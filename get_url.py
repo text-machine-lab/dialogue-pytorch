@@ -19,10 +19,11 @@ def remove_tags(s, tags=['a', 'p']):
 def get_paragraphs(url, timeout=10):
     try:
         page = urllib.request.urlopen(url, timeout=timeout)
+
+        soup = BeautifulSoup(page, 'html.parser')
     except:
         return None
 
-    soup = BeautifulSoup(page, 'html.parser')
     if hasattr(soup, 'title') and hasattr(soup.title, 'text'):
         title = soup.title.text
     else:

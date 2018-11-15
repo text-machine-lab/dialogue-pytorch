@@ -8,7 +8,7 @@ import os
 
 class RedditDataset(Dataset):
     def __init__(self, path, vocab_path, max_doc, max_title, max_history, max_response, regen=False, max_vocab=None,
-                 max_lines_vocab_gen=1000):
+                 max_lines_vocab_gen=100000):
         """Create a Dataset object capable of loading the Reddit dataset.
 
         path - location of Reddit .tsv file containing (comment_title, num_comments, **comments, doc_title, doc) lines
@@ -21,7 +21,8 @@ class RedditDataset(Dataset):
         max_vocab - maximum number of tokens in vocabulary
         max_line_vocab_gen - prune each line to this size for faster vocab creation"""
         # count number of examples
-        self.num_examples = sum([int(line.split('\t')[1]) for line in open(path, 'r')])
+        with open(path, 'r') as f:
+            self.num_examples = sum([int(line.split('\t')[1]) for line in f])
         self.max_doc = max_doc  # max size of document in tokens (with stop)
         self.max_history = max_history
         self.max_response = max_response
@@ -30,6 +31,7 @@ class RedditDataset(Dataset):
         self.eos = '<eos>'
         self.unk = '<unk>'
         self.eoc = '<eoc>'  # end of comment
+        self.bos = '<bos>'
         if not os.path.exists(vocab_path) or regen:
             self.vocab = self.tokenize_and_build_vocab(path, max_vocab=max_vocab)
             pickle.dump(self.vocab, open(vocab_path, 'wb'))
@@ -63,16 +65,33 @@ class RedditDataset(Dataset):
         vocab.add_doc(self.eos)
         vocab.add_doc(self.unk)
         vocab.add_doc(self.eoc)
+        vocab.add_doc(self.bos)
         vocab.insert_token('', 0)  # get that padding token in there
         return vocab
 
     def load_example(self):
         """Load next example from input file."""
-        line = next(self.file).lower()
+        # while True:
+        line = next(self.file).strip().lower()
+        #     if line is None:
+        #         return None
+        #     if len(line.split('\t')) < 4:
+        #         continue
+        #     else:
+        #         break
         #import pdb; pdb.set_trace()
         entries = line.split('\t')
-        conv_title = word_tokenize(entries[0])
         num_comments = int(entries[1])
+
+        if len(entries) != 4 + num_comments:
+            print(len(entries))
+            print(line)
+            print('############')
+            for entry in entries:
+                print('[' + entry + ']')
+            exit(1)
+
+        conv_title = word_tokenize(entries[0])
         comments = [' '.join(word_tokenize(comment)) for comment in entries[2:2+num_comments]]
         doc_title = word_tokenize(entries[2+num_comments])[:self.max_title]
         doc = word_tokenize(' '.join(entries[3+num_comments].split()[:self.max_doc]))

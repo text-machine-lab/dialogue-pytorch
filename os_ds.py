@@ -115,38 +115,38 @@ class OpenSubtitlesDataset(Dataset):
 
 ############ TESTING ###################################################################################################
 
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--source', default=None)
+    parser.add_argument('--save_path', default=None)
+    parser.add_argument('--regenerate', default=False, action='store_true')
+    args = parser.parse_args()
 
-parser = argparse.ArgumentParser()
-parser.add_argument('--source', default=None)
-parser.add_argument('--save_path', default=None)
-parser.add_argument('--regenerate', default=False, action='store_true')
-args = parser.parse_args()
+    max_len = 20
+    history_len = 10
+    vocab_len = 10000
+    max_examples = None
 
-max_len = 20
-history_len = 10
-vocab_len = 10000
-max_examples = None
+    ds = OpenSubtitlesDataset(args.source, max_len, history_len, vocab_len, args.save_path, regen=args.regenerate,
+                              max_examples=max_examples)
 
-ds = OpenSubtitlesDataset(args.source, max_len, history_len, vocab_len, args.save_path, regen=args.regenerate,
-                          max_examples=max_examples)
+    print('Vocab size: %s' % len(ds.vocab))
+    print('Dataset size: %s' % len(ds))
+    print('Num sources: %s' % len(ds.sources))
 
-print('Vocab size: %s' % len(ds.vocab))
-print('Dataset size: %s' % len(ds))
-print('Num sources: %s' % len(ds.sources))
+    result = []
+    for i in tqdm(range(len(ds))):
+        np_history, np_response = ds[i]
 
-result = []
-for i in tqdm(range(len(ds))):
-    np_history, np_response = ds[i]
+        if i < 10:
+            history = convert_npy_to_str(np_history, ds.vocab, ds.eos)
+            response = convert_npy_to_str(np_response, ds.vocab, ds.eos)
+            result.append((history, response))
 
-    if i < 10:
-        history = convert_npy_to_str(np_history, ds.vocab, ds.eos)
-        response = convert_npy_to_str(np_response, ds.vocab, ds.eos)
-        result.append((history, response))
-
-for (history, response) in result:
-    print(history)
-    print(response)
-    print()
+    for (history, response) in result:
+        print(history)
+        print(response)
+        print()
 
 
 

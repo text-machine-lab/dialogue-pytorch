@@ -129,8 +129,8 @@ def convert_npy_to_str(vector, vocab, eos=None):
     stop - token to indicate stop of string creation (ignore later indices)
     """
     output = []
-    for i in range(vector.numel):
-        token = vocab(vector[i])
+    for i in range(vector.size):
+        token = vocab[vector[i]]
         output.append(token)
         if eos is not None and token == eos:
             break
