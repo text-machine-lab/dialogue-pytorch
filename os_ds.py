@@ -6,6 +6,7 @@ from tqdm import tqdm
 import numpy as np
 import os
 import random
+import traceback
 import pickle
 
 class OpenSubtitlesDataset(Dataset):
@@ -26,13 +27,16 @@ class OpenSubtitlesDataset(Dataset):
         super().__init__()
         self.max_len = max_len
         self.history_len = history_len
+        self.max_examples = max_examples
+        self.source_dir = source_dir
         self.vocab_len = vocab_len
+        self.sources = None
         self.eos = '<eos>'
         self.unk = '<unk>'
         self.bos = '<bos>'
 
         # we open a bunch of data files, and read randomly from each file
-        self.sources = [open(os.path.join(source_dir, f), 'r') for f in os.listdir(source_dir)
+        self.sources = [open(os.path.join(source_dir, f), 'r', encoding='utf-8') for f in os.listdir(source_dir)
                         if os.path.isfile(os.path.join(source_dir, f))]
 
         if save_path is None or not os.path.exists(save_path) or regen:
@@ -55,15 +59,25 @@ class OpenSubtitlesDataset(Dataset):
             # load vocabulary and number of lines
             self.num_lines, self.vocab = pickle.load(open(save_path, 'rb'))
 
-        for f in self.sources:
-            f.seek(0) # reset every file
+        self.load_sources(source_dir)
 
+    def load_sources(self, source_dir):
+        """
+        Load data files containing dialogue utterances, one utterance per line.
 
-        self.num_examples = self.num_lines // (history_len + 1) - len(self.sources)
+        :param source_dir: Directory containing source files
+        """
+        if self.sources is not None:
+            for source in self.sources:
+                source.close()
 
-        if max_examples is not None:
-            self.num_examples = min(max_examples, self.num_examples)
+        self.sources = [open(os.path.join(source_dir, f), 'r', encoding='utf-8') for f in os.listdir(source_dir)
+                        if os.path.isfile(os.path.join(source_dir, f))]
 
+        self.num_examples = self.num_lines // (self.history_len + 1) - 2 * len(self.sources)
+
+        if self.max_examples is not None:
+            self.num_examples = min(self.max_examples, self.num_examples)
 
     def __len__(self):
         """
@@ -86,7 +100,8 @@ class OpenSubtitlesDataset(Dataset):
 
         # here we randomly pick a file
         # if the file is empty, we discard it
-        assert len(self.sources) > 0
+        if len(self.sources) == 0:
+            self.load_sources(self.source_dir)
         history = []
         index = random.randrange(len(self.sources))
         source = self.sources[index]
@@ -94,8 +109,10 @@ class OpenSubtitlesDataset(Dataset):
         # grab len_history messages
         for i in range(self.history_len + 1):
             message = source.readline()
+
             if message == "":
                 self.sources.remove(source)
+                #print('Removed source: %s' % source.name)
                 # try getting an example from a different source
                 return self.__getitem__(item)
             else:
