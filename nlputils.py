@@ -90,6 +90,21 @@ class Vocab:
         return len(self.tk_to_idx)
 
 
+def raw_count(filename):
+    """Extremely fast line count."""
+    f = open(filename, 'rb')
+    lines = 0
+    buf_size = 1024 * 1024
+    read_f = f.raw.read
+
+    buf = read_f(buf_size)
+    while buf:
+        lines += buf.count(b'\n')
+        buf = read_f(buf_size)
+
+    return lines
+
+
 def convert_str_to_npy(string, vocab, max_len, eos=None, pad=0, unk=None):
     """Convert a string into a numpy vector containing
     indices which represent each token, as indicated by a vocabulary. If

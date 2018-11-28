@@ -24,17 +24,19 @@ device = torch.device(args.device if torch.cuda.is_available() else "cpu")
 
 max_history = 10
 max_len = 20
-max_examples = 100000
-max_vocab=10000
+max_examples = None
+max_vocab = 30000
 num_epochs = args.epochs
 d_emb = 200
 d_enc = 300
-d_dec = 300
-lr = .001
+d_dec = 400
+lr = .0001
 
 # here we first test the reddit dataset object
 ds = OpenSubtitlesDataset(args.source, max_len, max_history, max_vocab, args.vocab, max_examples=max_examples,
                           regen=args.regen)
+
+print('Num lines: %s' % ds.num_lines)
 
 print('Num examples: %s' % len(ds))
 print('Num sources: %s' % len(ds.sources))
