@@ -6,6 +6,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from os_ds import OpenSubtitlesDataset
+from ubuntu import UbuntuCorpus
 from models import Seq2Seq, random_sample
 from nlputils import convert_npy_to_str
 from tqdm import tqdm
@@ -18,6 +19,7 @@ parser.add_argument('--regen', default=False, action='store_true', help='Renerat
 parser.add_argument('--device', default='cuda:0', help='Cuda device (or cpu) for tensor operations')
 parser.add_argument('--epochs', default=1, action='store', type=int, help='Number of epochs to run model for')
 parser.add_argument('--restore', default=False, action='store_true', help='Set to restore model from save')
+parser.add_argument('--dataset', default='ubuntu', help='Choose either opensubtitles or ubuntu dataset to train')
 args = parser.parse_args()
 
 device = torch.device(args.device if torch.cuda.is_available() else "cpu")
@@ -25,16 +27,26 @@ device = torch.device(args.device if torch.cuda.is_available() else "cpu")
 max_history = 10
 max_len = 20
 max_examples = None
-max_vocab = 30000
+max_vocab_examples = None
+max_vocab = 50000
 num_epochs = args.epochs
 d_emb = 200
 d_enc = 300
 d_dec = 400
 lr = .0001
 
-# here we first test the reddit dataset object
-ds = OpenSubtitlesDataset(args.source, max_len, max_history, max_vocab, args.vocab, max_examples=max_examples,
-                          regen=args.regen)
+ds = None
+if args.dataset == 'opensubtitles':
+    print('Using OpenSubtitles dataset')
+    ds = OpenSubtitlesDataset(args.source, max_len, max_history, max_vocab, args.vocab, max_examples=max_examples,
+                              regen=args.regen)
+elif args.dataset == 'ubuntu':
+    print('Using Ubuntu dialogue corpus')
+    ds = UbuntuCorpus(args.source, args.vocab, max_vocab, max_len, max_history, max_examples=max_examples,
+                      max_examples_for_vocab=max_vocab_examples, regen=args.regen)
+else:
+    print('Must specify either ubuntu or opensubtitles dataset.')
+    exit()
 
 print('Num lines: %s' % ds.num_lines)
 
@@ -77,7 +89,7 @@ for epoch_idx in range(num_epochs):
         if (i % 1000 == 999 or i == len(dl) - 1) and args.model_path is not None:
             torch.save(model.state_dict(), args.model_path)
 
-print('Evaluation')
+print('Evaluating')
 model.eval()
 
 # print examples
