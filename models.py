@@ -84,3 +84,41 @@ class Decoder(nn.Module):
             return logits
 
 
+class MismatchClassifier(nn.Module):
+    def __init__(self, d_emb, d_enc, d_vocab):
+        super().__init__()
+        self.m_enc = Encoder(d_emb, d_enc, d_vocab)
+        self.r_enc = Encoder(d_emb, d_enc, d_vocab)
+        self.m_linear = nn.Linear(d_enc, d_enc)
+        self.r_linear = nn.Linear(d_enc, d_enc)
+
+    def forward(self, x, y):
+        # read in message and produce a vector
+        _, m_enc_out = self.m_enc(x)
+        m_vector = self.m_linear(m_enc_out)
+
+        # read in response and produce a vector
+        _, r_enc_out = self.r_enc(y)
+        r_vector = self.r_linear(r_enc_out)
+
+        # take L1 norm of vectors
+        diff = (m_vector - r_vector).abs().mean(-1)
+
+        # return negative exponential bounded between [0, 1]
+        return torch.exp(-diff)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -8,6 +8,7 @@ import os
 import random
 import traceback
 import pickle
+import h5py
 
 class OpenSubtitlesDataset(Dataset):
     def __init__(self, source_dir, max_len, history_len, vocab_len, save_path, max_examples=None, regen=False):
@@ -142,7 +143,6 @@ if __name__ == '__main__':
     max_len = 20
     history_len = 10
     vocab_len = 10000
-    max_examples = None
 
     ds = OpenSubtitlesDataset(args.source, max_len, history_len, vocab_len, args.save_path, regen=args.regenerate,
                               max_examples=max_examples)
