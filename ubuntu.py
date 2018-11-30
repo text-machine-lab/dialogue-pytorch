@@ -14,6 +14,9 @@ class UbuntuCorpus(Dataset):
                  max_examples=None, max_examples_for_vocab=None, regen=False):
         super().__init__()
 
+        if tmp_dir is not None and not regen:
+            print("-------- Warning: old vocab is used!")
+
         # set no upper bound on examples used in case of None
         if max_examples is None:
             max_examples = float('inf')
