@@ -10,12 +10,14 @@ from models import Seq2Seq, random_sample
 from nlputils import convert_npy_to_str
 from tqdm import tqdm
 
+SAMPLE_PATH = '/data2/ymeng/opensubtitles_sample/'
+
 parser = argparse.ArgumentParser(description='Run seq2seq model on Opensubtitles conversations')
-parser.add_argument('--source', default=None, help='Directory to look for data files')
+parser.add_argument('--source', default=SAMPLE_PATH, help='Directory to look for data files')
 parser.add_argument('--model_path', default=None, help='File path where model is saved')
 parser.add_argument('--vocab', help='Where to save generated vocab file')
 parser.add_argument('--regen', default=False, action='store_true', help='Renerate vocabulary')
-parser.add_argument('--device', default='cuda:0', help='Cuda device (or cpu) for tensor operations')
+parser.add_argument('--device', default='cuda:1', help='Cuda device (or cpu) for tensor operations')
 parser.add_argument('--epochs', default=1, action='store', type=int, help='Number of epochs to run model for')
 parser.add_argument('--restore', default=False, action='store_true', help='Set to restore model from save')
 args = parser.parse_args()
