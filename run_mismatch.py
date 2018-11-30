@@ -1,0 +1,108 @@
+"""Train and evaluate model which classifies whether an output response is correct
+for a given input message (they appear as a message-response pair in the dataset) or if
+the response is mismatched (taken from a different message in the dataset). This classification
+can be a measure of the appropriateness of the output response with respect to the input."""
+import argparse
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+from ubuntu import UbuntuCorpus
+from models import MismatchClassifier
+import numpy as np
+
+parser = argparse.ArgumentParser(description='Run seq2seq model on Opensubtitles conversations')
+parser.add_argument('--source', default=None, help='Directory to look for data files')
+parser.add_argument('--model_path', default=None, help='File path where model is saved')
+parser.add_argument('--vocab', help='Where to save generated vocab file')
+parser.add_argument('--regen', default=False, action='store_true', help='Renerate vocabulary')
+parser.add_argument('--device', default='cuda:0', help='Cuda device (or cpu) for tensor operations')
+parser.add_argument('--epochs', default=1, action='store', type=int, help='Number of epochs to run model for')
+parser.add_argument('--restore', default=False, action='store_true', help='Set to restore model from save')
+args = parser.parse_args()
+
+device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+
+max_history = 10
+max_len = 20
+max_examples = 100000
+max_vocab_examples = None
+max_vocab=10000
+num_epochs = args.epochs
+d_emb = 200
+d_enc = 500
+lr = .001
+
+ds = UbuntuCorpus(args.source, args.vocab, max_vocab, max_len, max_history, max_examples=max_examples,
+                  max_examples_for_vocab=max_vocab_examples, regen=args.regen, mismatch=True)
+
+print('Num examples: %s' % len(ds))
+print('Vocab length: %s' % len(ds.vocab))
+
+model = MismatchClassifier(d_emb, d_enc, len(ds.vocab))
+
+if args.restore and args.model_path is not None:
+    print('Restoring model from save')
+    model.load_state_dict(torch.load(args.model_path))
+
+######### TRAINING #####################################################################################################
+
+def calc_accuracy(logits, label):
+    preds = (logits >= 0).long()
+    accuracy = (preds == label).float().mean()
+    return accuracy
+
+model.to(device)
+model.train()
+
+print('Training')
+
+# train model architecture
+bce = nn.BCEWithLogitsLoss()
+optim = optim.Adam(model.parameters(), lr=lr)
+losses = []
+accuracies = []
+
+for epoch_idx in range(num_epochs):
+    dl = DataLoader(ds, batch_size=32, shuffle=True, num_workers=1)
+    bar = tqdm(dl)  # visualize progress bar
+    for i, data in enumerate(bar):
+        data = [d.to(device) for d in data]
+        history, response, label = data
+
+        logits = model(history, response)
+        loss = bce(logits, label.float())
+        optim.zero_grad()
+        loss.backward()
+        losses.append(loss.item())
+        accuracies.append(calc_accuracy(logits, label).item())
+        optim.step()
+
+        if i % 100 == 99:
+            bar.set_description('Loss: %s, accuracy: %s' % (np.mean(losses), np.mean(accuracies)))
+            losses = []
+            accuracies = []
+        if (i % 1000 == 999 or i == len(dl) - 1) and args.model_path is not None:
+            torch.save(model.state_dict(), args.model_path)
+
+####### EVALUATION #####################################################################################################
+print('Evaluating')
+eval_batches = 10000 // 32
+model.eval()
+with torch.no_grad():
+    dl = DataLoader(ds, batch_size=32, shuffle=True, num_workers=1)
+    bar = tqdm(dl, total=eval_batches)
+    accuracies = []
+    for i, data in enumerate(bar):
+
+        if i >= eval_batches:
+            bar.close()
+            break
+
+        data = [d.to(device) for d in data]
+        history, response, label = data
+        logits = model(history, response)
+        accuracies.append(calc_accuracy(logits, label))
+
+    print('Accuracy: %s' % np.mean(accuracies))
