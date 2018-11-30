@@ -160,10 +160,12 @@ class UbuntuCorpus(Dataset):
 
         self.prev_response = response
 
+        np_match = np.array(is_match, dtype=int)
+
         if not self.mismatch:
             return np_history, np_response
         else:
-            return np_history, np_response, np.array(is_match)
+            return np_history, np_response, np_match
 
 def format_line(line):
     line = re.sub(r"http\S+", '<url>', line)

@@ -19,7 +19,7 @@ parser.add_argument('--regen', default=False, action='store_true', help='Renerat
 parser.add_argument('--device', default='cuda:0', help='Cuda device (or cpu) for tensor operations')
 parser.add_argument('--epochs', default=1, action='store', type=int, help='Number of epochs to run model for')
 parser.add_argument('--restore', default=False, action='store_true', help='Set to restore model from save')
-parser.add_argument('--dataset', default='ubuntu', help='Choose either opensubtitles or ubuntu dataset to train')
+# parser.add_argument('--dataset', default='ubuntu', help='Choose either opensubtitles or ubuntu dataset to train')
 parser.add_argument('--val', default=None, help='Validation set to use for model evaluation')
 args = parser.parse_args()
 
@@ -38,18 +38,18 @@ lr = .001
 
 ########### DATASET CREATION ###########################################################################################
 
-ds = None
-if args.dataset == 'opensubtitles':
-    print('Using OpenSubtitles dataset')
-    ds = OpenSubtitlesDataset(args.source, max_len, max_history, max_vocab, args.vocab, max_examples=max_examples,
-                              regen=args.regen)
-elif args.dataset == 'ubuntu':
-    print('Using Ubuntu dialogue corpus')
-    ds = UbuntuCorpus(args.source, args.vocab, max_vocab, max_len, max_history, max_examples=max_examples,
-                      max_examples_for_vocab=max_vocab_examples, regen=args.regen)
-else:
-    print('Must specify either ubuntu or opensubtitles dataset.')
-    exit()
+# ds = None
+# if args.dataset == 'opensubtitles':
+#     print('Using OpenSubtitles dataset')
+#     ds = OpenSubtitlesDataset(args.source, max_len, max_history, max_vocab, args.vocab, max_examples=max_examples,
+#                               regen=args.regen)
+# elif args.dataset == 'ubuntu':
+print('Using Ubuntu dialogue corpus')
+ds = UbuntuCorpus(args.source, args.vocab, max_vocab, max_len, max_history, max_examples=max_examples,
+                  max_examples_for_vocab=max_vocab_examples, regen=args.regen)
+# else:
+#     print('Must specify either ubuntu or opensubtitles dataset.')
+#     exit()
 
 print('Num examples: %s' % len(ds))
 print('Vocab length: %s' % len(ds.vocab))

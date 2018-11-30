@@ -102,10 +102,15 @@ class MismatchClassifier(nn.Module):
         r_vector = self.r_linear(r_enc_out)
 
         # take L1 norm of vectors
-        diff = (m_vector - r_vector).abs().mean(-1)
+        #diff = (m_vector - r_vector).abs().mean(-1)
 
         # return negative exponential bounded between [0, 1]
-        return torch.exp(-diff)
+
+        comparison = torch.bmm(m_vector.view(-1, 1, m_vector.shape[-1]), r_vector.view(-1, r_vector.shape[-1], 1))
+
+        comparison = comparison.view(-1) / m_vector.shape[-1]
+
+        return comparison
 
 
 
