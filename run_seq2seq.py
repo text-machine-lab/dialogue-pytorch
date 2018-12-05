@@ -15,6 +15,7 @@ SAMPLE_PATH = '/data2/ymeng/opensubtitles_sample/'
 
 parser = argparse.ArgumentParser(description='Run seq2seq model on Opensubtitles conversations')
 parser.add_argument('--source', default=SAMPLE_PATH, help='Directory to look for data files')
+parser.add_argument('--max_examples', default=None, type=int, help='max num of example to use for training')
 parser.add_argument('--model_path', default=None, help='File path where model is saved')
 parser.add_argument('--vocab', help='Where to save generated vocab file')
 parser.add_argument('--regen', default=False, action='store_true', help='Renerate vocabulary')
@@ -26,10 +27,10 @@ parser.add_argument('--val', default=None, help='Validation set to use for model
 args = parser.parse_args()
 
 device = torch.device(args.device if torch.cuda.is_available() else "cpu")
-
+print(type(args.max_examples))
 max_history = 10
 max_len = 20
-max_examples = None
+max_examples = args.max_examples
 max_vocab_examples = None
 max_vocab = 50000
 num_epochs = args.epochs
@@ -99,7 +100,7 @@ print('Printing examples')
 model.eval()
 with torch.no_grad():
     # print examples
-    dl = DataLoader(ds, batch_size=5, num_workers=2)
+    dl = DataLoader(ds, batch_size=5, num_workers=1)
     for i, data in enumerate(dl):
         data = [d.to(device) for d in data]
         history, response = data
@@ -113,8 +114,7 @@ with torch.no_grad():
             context = convert_npy_to_str(np_context, ds.vocab, ds.eos)
             pred = convert_npy_to_str(np_pred, ds.vocab, ds.eos)
             print('History: %s' % context)
-            print('Prediction: %s' % pred)
-            print()
+            print('Prediction: %s\n' % pred)
 
     if args.val is not None:
 

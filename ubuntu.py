@@ -37,7 +37,7 @@ class UbuntuCorpus(Dataset):
         """
         super().__init__()
 
-        if tmp_dir is not None and not regen:
+        if tmp_file is not None and not regen:
             print("-------- Warning: old vocab is used!")
 
         # set no upper bound on examples used in case of None

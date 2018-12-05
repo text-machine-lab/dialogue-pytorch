@@ -72,7 +72,7 @@ class Decoder(nn.Module):
             logits = self.linear(state)
             all_logits.append(logits)
             if labels is not None:
-                word = self.embs(labels[:, step])
+                word = self.embs(labels[:, step])  # always teacher forcing
             else:
                 pred = sample_func(logits)
                 word = self.embs(pred)
