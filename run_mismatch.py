@@ -11,6 +11,7 @@ from tqdm import tqdm
 from ubuntu import UbuntuCorpus
 from models import MismatchClassifier
 import numpy as np
+from glove import GloveLoader
 
 parser = argparse.ArgumentParser(description='Run seq2seq model on Opensubtitles conversations')
 parser.add_argument('--source', default=None, help='Directory to look for data files')
@@ -20,18 +21,20 @@ parser.add_argument('--regen', default=False, action='store_true', help='Renerat
 parser.add_argument('--device', default='cuda:0', help='Cuda device (or cpu) for tensor operations')
 parser.add_argument('--epochs', default=1, action='store', type=int, help='Number of epochs to run model for')
 parser.add_argument('--restore', default=False, action='store_true', help='Set to restore model from save')
+parser.add_argument('--glove', default=None, help='Path to glove file')
+parser.add_argument('--val', default=None, help='Validation set used to evaluate model accuracy')
 args = parser.parse_args()
 
 device = torch.device(args.device if torch.cuda.is_available() else "cpu")
 
 max_history = 10
 max_len = 20
-max_examples = 100000
+max_examples = None
 max_vocab_examples = None
 max_vocab=10000
 num_epochs = args.epochs
 d_emb = 200
-d_enc = 500
+d_enc = 200
 lr = .001
 
 ds = UbuntuCorpus(args.source, args.vocab, max_vocab, max_len, max_history, max_examples=max_examples,
@@ -41,6 +44,13 @@ print('Num examples: %s' % len(ds))
 print('Vocab length: %s' % len(ds.vocab))
 
 model = MismatchClassifier(d_emb, d_enc, len(ds.vocab))
+
+if args.glove is not None:
+    # initialize input embeddings from glove embeddings
+    loader = GloveLoader(args.glove)
+    np_embs = loader.build_embeddings(ds.vocab)
+    embs = nn.Parameter(torch.from_numpy(np_embs).float())
+    model.m_enc.embs.weight = model.r_enc.embs.weight = embs
 
 if args.restore and args.model_path is not None:
     print('Restoring model from save')
@@ -90,19 +100,25 @@ for epoch_idx in range(num_epochs):
 print('Evaluating')
 eval_batches = 10000 // 32
 model.eval()
-with torch.no_grad():
-    dl = DataLoader(ds, batch_size=32, shuffle=True, num_workers=1)
-    bar = tqdm(dl, total=eval_batches)
-    accuracies = []
-    for i, data in enumerate(bar):
 
-        if i >= eval_batches:
-            bar.close()
-            break
+if args.val is not None:
+    print('Evaluating perplexity')
+    ds = UbuntuCorpus(args.val, args.vocab, max_vocab, max_len, max_history, max_examples=10000,
+                      max_examples_for_vocab=max_vocab_examples, regen=False, mismatch=True)
+    with torch.no_grad():
+        dl = DataLoader(ds, batch_size=32, shuffle=True, num_workers=1)
+        bar = tqdm(dl, total=eval_batches)
+        accuracies = []
+        for i, data in enumerate(bar):
 
-        data = [d.to(device) for d in data]
-        history, response, label = data
-        logits = model(history, response)
-        accuracies.append(calc_accuracy(logits, label))
+            if i >= eval_batches:
+                bar.close()
+                break
 
-    print('Accuracy: %s' % np.mean(accuracies))
+            data = [d.to(device) for d in data]
+            history, response, label = data
+
+            logits = model(history, response)
+            accuracies.append(calc_accuracy(logits, label))
+
+        print('Accuracy: %s' % np.mean(accuracies))

@@ -11,6 +11,11 @@ import re
 from tqdm import tqdm
 from nlputils import Vocab, convert_str_to_npy, convert_npy_to_str, raw_count
 
+# lock to make csv accesses safe
+import threading
+lock = threading.Lock()
+
+
 class UbuntuCorpus(Dataset):
     def __init__(self, source_dir, tmp_file, vocab_len, max_len, history_len,
                  max_examples=None, max_examples_for_vocab=None, regen=False,
@@ -116,18 +121,23 @@ class UbuntuCorpus(Dataset):
         self.source = csv.reader(open(self.source_dir, 'r'))
 
     def __len__(self):
-        return min(self.num_examples, self.max_examples)
+        # only half of the examples are real (1), the rest are fake (0)
+        return min(self.num_examples // 2, self.max_examples)
 
     def __getitem__(self, item):
         label = '0'
         history = response = None
-        while label == '0':
-            # find the next valid response
-            line = next(self.source)
-            if len(line) == 3:
-                history, response, label = line
-            else:
-                self.reset()
+
+        # we thread-lock the csv writer
+        with lock:
+            while label == '0':
+                # find the next valid response
+                line = next(self.source)
+                if len(line) == 3:
+                    history, response, label = line
+                else:
+                    print('End of file. Reloading file')
+                    self.reset()
 
         history = format_line(history)
         response = format_line(response)

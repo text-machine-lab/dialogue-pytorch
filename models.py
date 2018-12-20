@@ -5,25 +5,50 @@ from functools import partial
 import torch.nn.functional as F
 
 class Seq2Seq(nn.Module):
-    def __init__(self, d_emb, d_enc, d_vocab, d_dec, max_len, bos_idx):
+    def __init__(self, d_emb, d_enc, d_vocab, d_dec, max_len, bos_idx, context_size=0):
         super().__init__()
         self.encoder = Encoder(d_emb, d_enc, d_vocab)
-        self.decoder = Decoder(d_vocab, d_emb, d_dec, max_len, d_enc, bos_idx)
+        self.decoder = Decoder(d_vocab, d_emb, d_dec, max_len, d_enc + context_size, bos_idx)
 
-    def forward(self, x, labels=None, sample_func=None):
+    def forward(self, x, labels=None, context=None, sample_func=None):
+        """
+        Run a sequence-to-sequence model on input sequence. Model learns
+        embeddings for vocabulary internally.
+
+        :param x: (batch_size, num_steps) containing indices per token in each sequence
+        :param labels: (batch_size, max_len) containing label indices used for teacher forcing
+        :param context: (batch_size, context_size) containing extra information for decoder (optional)
+        :param sample_func: function mapping logit tensor (batch_size, d_vocab) --> output tensor (batch_size,)
+        :return: logits tensor (batch_size, max_len, d_vocab), and predictions tensor (batch_size, max_len) if
+        labels are not provided (inference)
+        """
+
         e_states, e_final = self.encoder(x)
+
+        # allow user to condition the decoder on external context
+        if context is not None:
+            e_final = torch.cat([e_final, context], dim=-1)
+
         return self.decoder(e_final, labels=labels, sample_func=sample_func)
 
 
 class Encoder(nn.Module):
-    def __init__(self, d_emb, d_enc, d_vocab):
+    def __init__(self, d_emb, d_enc, d_vocab, dropout=0.0):
         super().__init__()
         self.embs = nn.Embedding(d_vocab, d_emb)
         self.rnn = nn.GRU(d_emb, d_enc, batch_first=True)
+        self.dropout = nn.Dropout(p=dropout)
 
     def forward(self, x):
-        x_embs = self.embs(x)
-        e_states, e_final = self.rnn(x_embs)
+        """
+        Runs GRU encoder over input tokens.
+        :param x: indices tensor (batch_size, max_len) or embeddings (batch_size, max_len, d_emb)
+        :return: encoder states (batch_size, max_len, d_enc) and final state (batch_size, d_enc)
+        """
+        if len(x.shape) == 2:
+            x = self.embs(x)
+        x = self.dropout(x)
+        e_states, e_final = self.rnn(x)
         e_final = e_final.squeeze(0)
         return e_states, e_final
 
@@ -85,21 +110,25 @@ class Decoder(nn.Module):
 
 
 class MismatchClassifier(nn.Module):
-    def __init__(self, d_emb, d_enc, d_vocab):
+    def __init__(self, d_emb, d_enc, d_vocab, dropout=0.1):
         super().__init__()
-        self.m_enc = Encoder(d_emb, d_enc, d_vocab)
-        self.r_enc = Encoder(d_emb, d_enc, d_vocab)
+        self.m_enc = Encoder(d_emb, d_enc, d_vocab, dropout=dropout)
+        self.r_enc = Encoder(d_emb, d_enc, d_vocab, dropout=dropout)
         self.m_linear = nn.Linear(d_enc, d_enc)
         self.r_linear = nn.Linear(d_enc, d_enc)
 
+    def encode_message(self, x):
+        _, m_enc_out = self.m_enc(x)
+        return self.m_linear(m_enc_out)
+
+    def encode_response(self, y):
+        _, r_enc_out = self.r_enc(y)
+        return self.r_linear(r_enc_out)
+
     def forward(self, x, y):
         # read in message and produce a vector
-        _, m_enc_out = self.m_enc(x)
-        m_vector = self.m_linear(m_enc_out)
-
-        # read in response and produce a vector
-        _, r_enc_out = self.r_enc(y)
-        r_vector = self.r_linear(r_enc_out)
+        m_vector = self.encode_message(x)
+        r_vector = self.encode_response(y)
 
         # take L1 norm of vectors
         #diff = (m_vector - r_vector).abs().mean(-1)
@@ -109,7 +138,7 @@ class MismatchClassifier(nn.Module):
         comparison = torch.bmm(m_vector.view(-1, 1, m_vector.shape[-1]), r_vector.view(-1, r_vector.shape[-1], 1))
 
         comparison = comparison.view(-1) / m_vector.shape[-1]
-
+        
         return comparison
 
 
