@@ -119,7 +119,7 @@ with torch.no_grad():
     if args.val is not None:
 
         print('Evaluating perplexity')
-        ds = UbuntuCorpus(args.val, args.vocab, max_vocab, max_len, max_history, max_examples=10000,
+        ds = UbuntuCorpus(args.val, args.vocab, max_vocab, max_len, max_history, max_examples=None,
                           max_examples_for_vocab=max_vocab_examples, regen=False)
 
         dl = DataLoader(ds, batch_size=32, num_workers=2)
