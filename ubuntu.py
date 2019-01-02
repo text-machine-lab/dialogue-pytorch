@@ -4,6 +4,7 @@ import os
 import pickle
 import csv
 import nltk
+import h5py
 import random
 import numpy as np
 import argparse
@@ -11,15 +12,11 @@ import re
 from tqdm import tqdm
 from nlputils import Vocab, convert_str_to_npy, convert_npy_to_str, raw_count
 
-# lock to make csv accesses safe
-import threading
-lock = threading.Lock()
-
 
 class UbuntuCorpus(Dataset):
-    def __init__(self, source_dir, tmp_file, vocab_len, max_len, history_len,
-                 max_examples=None, max_examples_for_vocab=None, regen=False,
-                 mismatch=False, split_history=False):
+    def __init__(self, source_dir, tmp_dir, vocab_len, max_len, history_len,
+                 max_examples=None, regen=False,
+                 mismatch=False, split_history=False, vocab=None):
         """
         This class loads the Ubuntu dialogue corpus .csv file and builds a vocabulary from it.
         This class is also able to be used by a dataloader to dispense individual (history, response)
@@ -30,7 +27,7 @@ class UbuntuCorpus(Dataset):
         does not rely on index.
 
         :param source_dir: .csv file to find ubuntu dialogues
-        :param tmp_file: where to save vocabulary and line count results for dataset for faster loading
+        :param tmp_dir: where to save vocabulary and hdf5 dataset file
         :param vocab_len: size of vocabulary after pruning
         :param max_len: responses longer than this many tokens are clipped
         :param history_len: number of messages in history
@@ -39,20 +36,18 @@ class UbuntuCorpus(Dataset):
         :param regen: if true, regenerate vocab and line count no matter what
         :param mismatch: if true, dispense (history, response, match) tuples
         :param split_history: if true, history matrix is shape (history_len, max_len) where each utterance is separated
+        :param vocab: if provided, use external vocabulary instead of generating one (for validation sets, etc)
         """
         super().__init__()
 
         # set no upper bound on examples used in case of None
         if max_examples is None:
             max_examples = float('inf')
-        if max_examples_for_vocab is None:
-            max_examples_for_vocab = float('inf')
 
         self.max_len = max_len
         self.history_len = history_len
         self.split_history = split_history
         self.max_examples = max_examples
-        self.max_examples_for_vocab = max_examples_for_vocab
         self.source_dir = source_dir
         self.vocab_len = vocab_len
         self.eos = '<eos>'
@@ -60,48 +55,88 @@ class UbuntuCorpus(Dataset):
         self.bos = '<bos>'
         self.pad = '<pad>'
         self.url = '<url>'
-        self.prev_response = None
+        self.vocab = vocab
         self.mismatch = False
 
-        if tmp_file is None or not os.path.exists(tmp_file) or regen:
+        if not os.path.exists(tmp_dir) or regen:
+
+            if not os.path.exists(tmp_dir):
+                os.makedirs(tmp_dir)
 
             # determine line count
             print('Counting lines in dataset')
-            self.num_examples = raw_count(self.source_dir)
+            # num_examples = min(raw_count(self.source_dir), max_examples)
+            with open(source_dir, 'r') as f:
+                num_examples = 0
+                for line in f:
+                    if line[-2] == '1':
+                        num_examples += 1
 
-            print('Generating vocabulary')
+            print('Line count: %s' % num_examples)
+            num_examples = min(num_examples, max_examples)
+
+            if self.vocab is None:
+                print('Generating vocabulary')
+                with open(source_dir, 'r') as f:
+                    csv_f = csv.reader(f)
+                    # regenerate vocabulary
+                    self.vocab = Vocab()
+                    bar = tqdm(csv_f, total=num_examples)
+                    for idx, entry in enumerate(bar):
+                        history, response, label = entry
+
+                        # format line
+                        if label == '1':
+                            # we only use responses which are correct (label 1)
+                            line = format_line(history + ' ' + response)
+                            self.vocab.add_doc(line)
+                            if idx + 1 >= num_examples:
+                                # if there is a maximum number of examples, we only build vocab from those
+                                bar.close()
+                                break
+
+                    # prune vocab to set size and add special tokens
+                    self.vocab.prune(self.vocab_len - 4)
+                    self.vocab.insert_token(self.pad, 0)
+                    self.vocab.add_doc(self.unk)
+                    self.vocab.add_doc(self.eos)
+                    self.vocab.add_doc(self.bos)
+
+                    # save vocabulary and number of lines
+            print('Saving vocabulary/dataset size')
+            pickle.dump(self.vocab, open(os.path.join(tmp_dir, 'vocab.pkl'), 'wb'))
+
+            print('Building dataset')
+            ds_file = h5py.File(os.path.join(tmp_dir, 'ds.hdf5'), 'w')
+            self.responses = ds_file.create_dataset('responses', [num_examples, self.max_len], int)
+            # choose to split history by utterance
+            if self.split_history:
+                self.histories = ds_file.create_dataset('histories', [num_examples, history_len, max_len], int)
+            else:
+                self.histories = ds_file.create_dataset('histories', [num_examples, history_len*max_len], int)
+
+            idx = 0  # index in dataset
             with open(source_dir, 'r') as f:
                 csv_f = csv.reader(f)
-                # regenerate vocabulary
-                self.vocab = Vocab()
-                bar = tqdm(csv_f, total=min(self.num_examples, max_examples_for_vocab))
-                for idx, entry in enumerate(bar):
-                    history, response, label = entry
-                    # format line
+                bar = tqdm(total=num_examples)
+                while True:
+                    if idx == num_examples:
+                        bar.close()
+                        break
+                    history, response, label = next(csv_f)
                     if label == '1':
-                        # we only use responses which are correct (label 1)
-                        line = format_line(history + ' ' + response)
-                        self.vocab.add_doc(line)
-                        if idx + 1 >= self.max_examples_for_vocab:
-                            # if there is a maximum number of examples, we only build vocab from those
-                            bar.close()
-                            break
-
-                # prune vocab to set size and add special tokens
-                self.vocab.prune(self.vocab_len - 4)
-                self.vocab.insert_token(self.pad, 0)
-                self.vocab.add_doc(self.unk)
-                self.vocab.add_doc(self.eos)
-                self.vocab.add_doc(self.bos)
-                # save vocabulary and number of lines
-                if tmp_file is not None:
-                    print('Saving vocabulary/dataset size')
-                    pickle.dump([self.num_examples, self.vocab], open(tmp_file, 'wb'))
+                        np_history, np_response = self.format_line_into_npy(history, response)
+                        self.responses[idx] = np_response
+                        self.histories[idx] = np_history
+                        idx += 1
+                        bar.update(1)
         else:
             # load vocabulary and number of lines
-            self.num_examples, self.vocab = pickle.load(open(tmp_file, 'rb'))
-
-        self.reset()
+            if self.vocab is None:
+                self.vocab = pickle.load(open(os.path.join(tmp_dir, 'vocab.pkl'), 'rb'))
+            ds_file = h5py.File(os.path.join(tmp_dir, 'ds.hdf5'), 'r')
+            self.responses = ds_file['responses']
+            self.histories = ds_file['histories']
 
         # dispense one example for testing
         history, response = self[0]
@@ -116,44 +151,50 @@ class UbuntuCorpus(Dataset):
         # if mismatch is true, we set it now after loading the first response
         self.mismatch = mismatch
 
-    def reset(self):
-        # open up csv reader to begin reading in examples
-        self.source = csv.reader(open(self.source_dir, 'r'))
+    def print_statistics(self):
+        """
+        Collect statistics on the first 10000 examples and print them.
+        :return:
+        """
+        with open(self.source_dir, 'r') as f:
+            csv_f = csv.reader(f)
+            hist_lens = []
+            resp_lens = []
+            labels = []
+            count = 0
+            while True:
+                if count == 10000:
+                    break
+                history, response, label = next(csv_f)
+                labels.append(float(label))
+                if label == '1':
+                    hist_lens.append(len(history.split()))
+                    resp_lens.append(len(response.split()))
+                    count += 1
 
-    def __len__(self):
-        # only half of the examples are real (1), the rest are fake (0)
-        return min(self.num_examples // 2, self.max_examples)
+        print('History median length: %s' % np.median(hist_lens))
+        print('History std length: %s' % np.std(hist_lens))
+        print('Response median length: %s' % np.median(resp_lens))
+        print('Response std length: %s' % np.std(resp_lens))
+        print('Fraction real responses: %s' % np.mean(labels))
 
-    def __getitem__(self, item):
-        label = '0'
-        history = response = None
 
-        # we thread-lock the csv writer
-        with lock:
-            while label == '0':
-                # find the next valid response
-                line = next(self.source)
-                if len(line) == 3:
-                    history, response, label = line
-                else:
-                    print('End of file. Reloading file')
-                    self.reset()
-
+    def format_line_into_npy(self, history, response):
+        """
+        Perform preprocessing of history and response and convert them into numpy arrays.
+        :param history: string containing message history
+        :param response: string containing response to message history
+        :return: np_history size (history_len*max_len,) or (history_len, max_len) and np_response size
+        (max_len,)
+        """
         history = format_line(history)
-        response = format_line(response)
 
-        # if mismatch option not set, feature is disabled and this always evaluates to true, normal behavior
-        # otherwise, randomly chooses to use current response or previous response with is_match flag set true/false
-        is_match = not self.mismatch or bool(random.getrandbits(1))
-
-        if is_match:
-            np_response = convert_str_to_npy(response, self.vocab, self.max_len, eos=self.eos, pad=0, unk=self.unk)
-        else:
-            np_response = convert_str_to_npy(self.prev_response, self.vocab, self.max_len, eos=self.eos, pad=0, unk=self.unk)
-
+        np_response = convert_str_to_npy(response, self.vocab, self.max_len, eos=self.eos, pad=0,
+                                         unk=self.unk)
 
         if not self.split_history:
-            np_history = convert_str_to_npy(history, self.vocab, self.max_len * self.history_len, eos=self.eos, pad=0,
+            np_history = convert_str_to_npy(history, self.vocab, self.max_len * self.history_len,
+                                            eos=self.eos, pad=0,
                                             unk=self.unk)
         else:
             # we want each utterance to be on a separate line
@@ -161,21 +202,33 @@ class UbuntuCorpus(Dataset):
             hist_utters = hist_utters[-self.history_len:]
             hist_utter_npys = []
             for utterance in hist_utters:
-                np_utter = convert_str_to_npy(utterance, self.vocab, self.max_len, eos=self.eos, pad=0, unk=self.unk)
+                np_utter = convert_str_to_npy(utterance, self.vocab, self.max_len, eos=self.eos, pad=0,
+                                              unk=self.unk)
                 hist_utter_npys.append(np_utter)
             np_history = np.stack(hist_utter_npys, axis=0)
             # we need add pad utterances to get array up to final shape (history_len, max_len)
             np_pad = np.zeros([self.history_len - np_history.shape[0], self.max_len])
             np_history = np.concatenate([np_pad, np_history], axis=0)
 
-        self.prev_response = response
+        return np_history, np_response
 
-        np_match = np.array(is_match, dtype=int)
+    def __len__(self):
+        # only half of the examples are real (1), the rest are fake (0)
+        return min(self.responses.shape[0], self.max_examples)
 
+    def __getitem__(self, index):
+        """
+        :param index: Index of example in dataset
+        :return: history, response numpy arrays where response is of shape (max_len,) and history depends on split_history
+        """
+        np_history = self.histories[index]
         if not self.mismatch:
+            np_response = self.responses[index]
             return np_history, np_response
         else:
-            return np_history, np_response, np_match
+            match = random.getrandbits(1)
+            np_response = self.responses[index - 1 + match]  # grab current response or last response is mismatch
+            return np_history, np_response, np.array(match)
 
 def format_line(line):
     line = re.sub(r"http\S+", '<url>', line)
@@ -197,15 +250,14 @@ if __name__ == '__main__':
     vocab_len = 10000
     max_len = 20
     history_len = 7
-    max_examples = None
-    max_vocab_examples = 10000
-    mismatch = False
+    max_examples = 10000
+    mismatch = True
     split_history = True
 
     # problem: history cuts off front end, not tale end
 
     ds = UbuntuCorpus(args.source, args.save_path, vocab_len, max_len, history_len, max_examples=max_examples,
-                      regen=args.regenerate, max_examples_for_vocab=max_vocab_examples, mismatch=mismatch,
+                      regen=args.regenerate, mismatch=mismatch,
                       split_history=split_history)
 
     print('Dataset length: %s' % len(ds))
@@ -213,7 +265,7 @@ if __name__ == '__main__':
 
     # now we print actual examples from the dataset
     for i in range(10):
-        result = ds[0]  # the index isn't used
+        result = ds[i]  # the index isn't used
         np_history = result[0]
         np_response = result[1]
 

@@ -38,7 +38,7 @@ d_enc = 200
 lr = .001
 
 ds = UbuntuCorpus(args.source, args.vocab, max_vocab, max_len, max_history, max_examples=max_examples,
-                  max_examples_for_vocab=max_vocab_examples, regen=args.regen, mismatch=True)
+                  regen=args.regen, mismatch=True)
 
 print('Num examples: %s' % len(ds))
 print('Vocab length: %s' % len(ds.vocab))
@@ -104,21 +104,27 @@ model.eval()
 if args.val is not None:
     print('Evaluating perplexity')
     ds = UbuntuCorpus(args.val, args.vocab, max_vocab, max_len, max_history, max_examples=10000,
-                      max_examples_for_vocab=max_vocab_examples, regen=False, mismatch=True)
-    with torch.no_grad():
-        dl = DataLoader(ds, batch_size=32, shuffle=True, num_workers=1)
-        bar = tqdm(dl, total=eval_batches)
-        accuracies = []
-        for i, data in enumerate(bar):
+                      regen=False, mismatch=True)
 
-            if i >= eval_batches:
-                bar.close()
-                break
+labels = []
 
-            data = [d.to(device) for d in data]
-            history, response, label = data
+with torch.no_grad():
+    dl = DataLoader(ds, batch_size=32, shuffle=True, num_workers=1)
+    bar = tqdm(dl, total=eval_batches)
+    accuracies = []
+    for i, data in enumerate(bar):
 
-            logits = model(history, response)
-            accuracies.append(calc_accuracy(logits, label))
+        if i >= eval_batches:
+            bar.close()
+            break
 
-        print('Accuracy: %s' % np.mean(accuracies))
+        data = [d.to(device) for d in data]
+        history, response, label = data
+
+        labels.append(label.float().mean().item())
+
+        logits = model(history, response)
+        accuracies.append(calc_accuracy(logits, label).item())
+
+    print('Accuracy: %s' % np.mean(accuracies))
+    print('Average label: %s' % np.mean(labels))

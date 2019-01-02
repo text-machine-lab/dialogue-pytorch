@@ -116,6 +116,7 @@ class MismatchClassifier(nn.Module):
         self.r_enc = Encoder(d_emb, d_enc, d_vocab, dropout=dropout)
         self.m_linear = nn.Linear(d_enc, d_enc)
         self.r_linear = nn.Linear(d_enc, d_enc)
+        self.out_linear = nn.Linear(d_enc * 4, 1)
 
     def encode_message(self, x):
         _, m_enc_out = self.m_enc(x)
@@ -130,14 +131,12 @@ class MismatchClassifier(nn.Module):
         m_vector = self.encode_message(x)
         r_vector = self.encode_response(y)
 
-        # take L1 norm of vectors
-        #diff = (m_vector - r_vector).abs().mean(-1)
+        diff = (m_vector - r_vector).abs()
+        mul = m_vector * r_vector
 
-        # return negative exponential bounded between [0, 1]
+        features = torch.cat([m_vector, r_vector, diff, mul], dim=-1)
 
-        comparison = torch.bmm(m_vector.view(-1, 1, m_vector.shape[-1]), r_vector.view(-1, r_vector.shape[-1], 1))
-
-        comparison = comparison.view(-1) / m_vector.shape[-1]
+        comparison = self.out_linear(features).squeeze(-1)
         
         return comparison
 

@@ -89,6 +89,9 @@ class Vocab:
     def __len__(self):
         return len(self.tk_to_idx)
 
+    def __str__(self):
+        return str(self.tk_to_idx)
+
 
 def raw_count(filename):
     """Extremely fast line count."""
