@@ -56,7 +56,6 @@ ds = UbuntuCorpus(args.source, args.temp, max_vocab, max_len, max_history, max_e
 print('Printing statistics for training set')
 ds.print_statistics()
 
-import pdb; pdb.set_trace()
 # use validation set if provided
 valds = None
 if args.val is not None:
@@ -142,13 +141,12 @@ for epoch_idx in range(num_epochs):
 
 ######### EVALUATION ###################################################################################################
 
-valdl = DataLoader(valds, batch_size=32, num_workers=0)
-
-print('Printing examples')
-model.eval()
 with torch.no_grad():
+    print('Printing generated examples')
+    dl = DataLoader(valds, batch_size=5, num_workers=0)
+    model.eval()
     # print examples
-    for i, data in enumerate(valdl):
+    for i, data in enumerate(dl):
         data = [d.to(device) for d in data]
         history, response = data
         if i > num_print:
@@ -158,17 +156,18 @@ with torch.no_grad():
         for j in range(preds.shape[0]):
             np_pred = preds[j].cpu().numpy()
             np_context = history[j].cpu().numpy()
+            np_target = response[j].cpu().numpy()
             context = convert_npy_to_str(np_context, valds.vocab, valds.eos)
             pred = convert_npy_to_str(np_pred, valds.vocab, valds.eos)
+            target = convert_npy_to_str(np_target, valds.vocab, valds.eos)
             print('History: %s' % context)
             print('Prediction: %s' % pred)
+            print('Target: %s' % target)
             print()
 
     print('Evaluating perplexity')
-
     dl = DataLoader(valds, batch_size=32, num_workers=0)
     total_batches = min(len(dl), 1500)
-
     entropies = []
     bar = tqdm(dl, total=total_batches)
     for i, data in enumerate(bar):
@@ -180,7 +179,7 @@ with torch.no_grad():
         data = [d.to(device) for d in data]
         history, response = data
         #appropriateness_vector = None if mismatch is None else mismatch.encode_message(history)
-        logits = model(history, labels=response, sample_func=random_sample)
+        logits = model(history, labels=response)
         loss = ce(logits.view(-1, logits.shape[-1]), response.view(-1))
         entropies.append(loss)
 

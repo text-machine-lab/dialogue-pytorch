@@ -162,15 +162,24 @@ class UbuntuCorpus(Dataset):
             resp_lens = []
             labels = []
             count = 0
-            while True:
-                if count == 10000:
-                    break
-                history, response, label = next(csv_f)
-                labels.append(float(label))
-                if label == '1':
-                    hist_lens.append(len(history.split()))
-                    resp_lens.append(len(response.split()))
-                    count += 1
+            try:
+                while True:
+                    if count == 10000:
+                        break
+                    history, response, label = next(csv_f)
+                    labels.append(float(label))
+                    if label == '1':
+                        if count < 10:
+                            print(history)
+                            print(response)
+                            print()
+                        hist_lens.append(len(history.split()))
+                        resp_lens.append(len(response.split()))
+                        count += 1
+            except:
+                # if iterator ends early
+                pass
+
 
         print('History median length: %s' % np.median(hist_lens))
         print('History std length: %s' % np.std(hist_lens))
@@ -188,6 +197,7 @@ class UbuntuCorpus(Dataset):
         (max_len,)
         """
         history = format_line(history)
+        response = format_line(response)
 
         np_response = convert_str_to_npy(response, self.vocab, self.max_len, eos=self.eos, pad=0,
                                          unk=self.unk)
@@ -231,9 +241,7 @@ class UbuntuCorpus(Dataset):
             return np_history, np_response, np.array(match)
 
 def format_line(line):
-    line = re.sub(r"http\S+", '<url>', line)
-    line = ' '.join(nltk.word_tokenize(line.strip().lower()))
-    return line.replace('< /s >', '</s>').replace('< url >', '<url>')
+    return ' '.join(nltk.word_tokenize(line.strip().lower()))
 
 
 ########### TESTING ####################################################################################################
