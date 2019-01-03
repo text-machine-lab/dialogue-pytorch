@@ -241,7 +241,9 @@ class UbuntuCorpus(Dataset):
             return np_history, np_response, np.array(match)
 
 def format_line(line):
-    return ' '.join(nltk.word_tokenize(line.strip().lower()))
+    line = re.sub(r"http\S+", '<url>', line)
+    line = ' '.join(nltk.word_tokenize(line.strip().lower()))
+    return line.replace('< /s >', '</s>').replace('< url >', '<url>')
 
 
 ########### TESTING ####################################################################################################
