@@ -169,10 +169,6 @@ class UbuntuCorpus(Dataset):
                     history, response, label = next(csv_f)
                     labels.append(float(label))
                     if label == '1':
-                        if count < 10:
-                            print(history)
-                            print(response)
-                            print()
                         hist_lens.append(len(history.split()))
                         resp_lens.append(len(response.split()))
                         count += 1
@@ -257,12 +253,12 @@ if __name__ == '__main__':
     parser.add_argument('--regenerate', default=False, action='store_true')
     args = parser.parse_args()
 
-    vocab_len = 10000
+    vocab_len = 50000
     max_len = 20
-    history_len = 7
-    max_examples = 10000
-    mismatch = True
-    split_history = True
+    history_len = 10
+    max_examples = None
+    mismatch = False
+    split_history = False
 
     # problem: history cuts off front end, not tale end
 
