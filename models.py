@@ -13,11 +13,7 @@ class MismatchSeq2Seq(nn.Module):
 
     def forward(self, x, labels=None, context=None, sample_func=None):
 
-        logit = None
-        if labels is None:
-            m_vector = self.mismatch.encode_message(x)
-        else:
-            logit, m_vector, r_vector = self.mismatch(x, labels, return_vectors=True)
+        m_vector = self.mismatch.encode_message(x)
 
         # allow user to condition the decoder on external context
         if context is not None:
@@ -26,10 +22,7 @@ class MismatchSeq2Seq(nn.Module):
         decoder_result = self.decoder(m_vector, labels=labels, sample_func=sample_func)
 
         # if labels are available, compute output of mismatch classifier
-        if labels is not None:
-            return decoder_result, logit
-        else:
-            return decoder_result
+        return decoder_result
 
 
 

@@ -230,13 +230,13 @@ class UbuntuCorpus(Dataset):
         :return: history, response numpy arrays where response is of shape (max_len,) and history depends on split_history
         """
         np_history = self.histories[index]
+        np_response = self.responses[index]
         if not self.mismatch:
-            np_response = self.responses[index]
             return np_history, np_response
         else:
             match = random.getrandbits(1)
-            np_response = self.responses[index - 1 + match]  # grab current response or last response is mismatch
-            return np_history, np_response, np.array(match)
+            np_chosen_response = self.responses[index - 1 + match]  # grab current response or last response is mismatch
+            return np_history, np_response, np_chosen_response, np.array(match)
 
 def format_line(line):
     line = line.replace('__EOS__', '</s>')  # fix mismatch between training and validation
