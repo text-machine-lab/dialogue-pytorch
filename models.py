@@ -4,6 +4,35 @@ import torch.nn as nn
 from functools import partial
 import torch.nn.functional as F
 
+
+class MismatchSeq2Seq(nn.Module):
+    def __init__(self, d_emb, d_enc, d_vocab, d_dec, max_len, bos_idx, context_size=0, dropout=0.1):
+        super().__init__()
+        self.mismatch = MismatchClassifier(d_emb, d_enc, d_vocab, dropout=dropout)
+        self.decoder = Decoder(d_vocab, d_emb, d_dec, max_len, d_enc + context_size, bos_idx)
+
+    def forward(self, x, labels=None, context=None, sample_func=None):
+
+        logit = None
+        if labels is None:
+            m_vector = self.mismatch.encode_message(x)
+        else:
+            logit, m_vector, r_vector = self.mismatch(x, labels, return_vectors=True)
+
+        # allow user to condition the decoder on external context
+        if context is not None:
+            m_vector = torch.cat([m_vector, context], dim=-1)
+
+        decoder_result = self.decoder(m_vector, labels=labels, sample_func=sample_func)
+
+        # if labels are available, compute output of mismatch classifier
+        if labels is not None:
+            return decoder_result, logit
+        else:
+            return decoder_result
+
+
+
 class Seq2Seq(nn.Module):
     def __init__(self, d_emb, d_enc, d_vocab, d_dec, max_len, bos_idx, context_size=0):
         super().__init__()
@@ -109,6 +138,7 @@ class Decoder(nn.Module):
             return logits
 
 
+
 class MismatchClassifier(nn.Module):
     def __init__(self, d_emb, d_enc, d_vocab, dropout=0.1):
         super().__init__()
@@ -119,14 +149,21 @@ class MismatchClassifier(nn.Module):
         self.out_linear = nn.Linear(d_enc * 4, 1)
 
     def encode_message(self, x):
+        """
+        Encode x using encoder, unless x is greater than two-dimensional, then assume already encoded.
+        :param x:
+        :return:
+        """
         _, m_enc_out = self.m_enc(x)
+
         return self.m_linear(m_enc_out)
 
     def encode_response(self, y):
         _, r_enc_out = self.r_enc(y)
+
         return self.r_linear(r_enc_out)
 
-    def forward(self, x, y):
+    def forward(self, x, y, return_vectors=False):
         # read in message and produce a vector
         m_vector = self.encode_message(x)
         r_vector = self.encode_response(y)
@@ -137,8 +174,11 @@ class MismatchClassifier(nn.Module):
         features = torch.cat([m_vector, r_vector, diff, mul], dim=-1)
 
         comparison = self.out_linear(features).squeeze(-1)
-        
-        return comparison
+
+        if return_vectors:
+            return comparison, m_vector, r_vector
+        else:
+            return comparison
 
 
 

@@ -17,7 +17,7 @@ class TelegramAlert:
         self.bot_token = None
         self.chat_id = None
 
-        # send message upon exception
+        # send message upon exceptionv
         self.prev_hook = sys.excepthook
         sys.excepthook = self.alerthook
 

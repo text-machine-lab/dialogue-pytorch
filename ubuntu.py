@@ -156,26 +156,28 @@ class UbuntuCorpus(Dataset):
         Collect statistics on the first 10000 examples and print them.
         :return:
         """
-        with open(self.source_dir, 'r') as f:
-            csv_f = csv.reader(f)
-            hist_lens = []
-            resp_lens = []
-            labels = []
-            count = 0
-            try:
-                while True:
-                    if count == 10000:
-                        break
-                    history, response, label = next(csv_f)
-                    labels.append(float(label))
-                    if label == '1':
-                        hist_lens.append(len(history.split()))
-                        resp_lens.append(len(response.split()))
-                        count += 1
-            except:
-                # if iterator ends early
-                pass
-
+        try:
+            with open(self.source_dir, 'r') as f:
+                csv_f = csv.reader(f)
+                hist_lens = []
+                resp_lens = []
+                labels = []
+                count = 0
+                try:
+                    while True:
+                        if count == 10000:
+                            break
+                        history, response, label = next(csv_f)
+                        labels.append(float(label))
+                        if label == '1':
+                            hist_lens.append(len(history.split()))
+                            resp_lens.append(len(response.split()))
+                            count += 1
+                except:
+                    # if iterator ends early
+                    pass
+        except StopIteration:
+            pass
 
         print('History median length: %s' % np.median(hist_lens))
         print('History std length: %s' % np.std(hist_lens))
@@ -237,6 +239,7 @@ class UbuntuCorpus(Dataset):
             return np_history, np_response, np.array(match)
 
 def format_line(line):
+    line = line.replace('__EOS__', '</s>')  # fix mismatch between training and validation
     line = re.sub(r"http\S+", '<url>', line)
     line = ' '.join(nltk.word_tokenize(line.strip().lower()))
     return line.replace('< /s >', '</s>').replace('< url >', '<url>')

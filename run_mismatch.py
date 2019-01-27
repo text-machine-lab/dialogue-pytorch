@@ -113,7 +113,7 @@ try:
         print('Evaluating perplexity')
         val_temp_dir = os.path.join(args.temp, 'validation')
         ds = UbuntuCorpus(args.val, val_temp_dir, max_vocab, max_len, max_history,
-                          regen=True, mismatch=True)
+                          regen=args.regen, mismatch=True, vocab=ds.vocab)
 
     labels = []
 
