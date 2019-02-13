@@ -1,4 +1,4 @@
-"""Train a sequence-to-sequence model on the Reddit dataset."""
+"""Train a language model on the Ubuntu dataset."""
 
 import argparse
 import os
@@ -10,7 +10,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from os_ds import OpenSubtitlesDataset
 from ubuntu import UbuntuCorpus
-from models import Seq2Seq, random_sample, MismatchClassifier, MismatchSeq2Seq
+from models import Seq2Seq, random_sample, Decoder
 from nlputils import convert_npy_to_str
 from tensorboard_logger import configure, log_value
 from tqdm import tqdm
@@ -26,7 +26,6 @@ parser.add_argument('--regen', default=False, action='store_true', help='Renerat
 parser.add_argument('--device', default='cuda:0', help='Cuda device (or cpu) for tensor operations')
 parser.add_argument('--epochs', default=1, action='store', type=int, help='Number of epochs to run model for')
 parser.add_argument('--restore', default=False, action='store_true', help='Set to restore model from save')
-parser.add_argument('--mismatch', default=False, action='store_true', help='If true, use mismatch classifier for training encoder')
 parser.add_argument('--num_print', default='1', help='Number of batches to print')
 parser.add_argument('--run', default=None, help='Path to save run values for viewing with Tensorboard')
 # parser.add_argument('--dataset', default='ubuntu', help='Choose either opensubtitles or ubuntu dataset to train')
@@ -45,18 +44,15 @@ max_vocab_examples = None
 max_vocab = 50000
 num_epochs = args.epochs
 num_print = int(args.num_print)
-d_mismatch_emb = 200
-d_mismatch_enc = 200
 d_emb = 200
-d_enc = 300
-d_dec = 400
+d_dec = 300
 lr = .0001
 
 ########### DATASET AND MODEL CREATION #################################################################################
 
 print('Using Ubuntu dialogue corpus')
 ds = UbuntuCorpus(args.source, args.temp, max_vocab, max_len, max_history,
-                  mismatch=args.mismatch, max_examples=max_examples, regen=args.regen)
+                  concat_feature=True, max_examples=max_examples, regen=args.regen)
 
 print('Printing statistics for training set')
 ds.print_statistics()
@@ -66,23 +62,19 @@ valds = None
 if args.val is not None:
     print('Using validation set for evaluation')
     val_temp_dir = os.path.join(args.temp, 'validation')
-    valds = UbuntuCorpus(args.val, val_temp_dir, max_vocab, max_len, max_history, regen=False,
+    valds = UbuntuCorpus(args.val, val_temp_dir, max_vocab, max_len, max_history, concat_feature=True, regen=args.regen,
                       vocab=ds.vocab)
     print('Printing statistics for validation set')
     valds.print_statistics()
 else:
     print('Using training set for evaluation')
 
-if args.regen: alert.write('run_seq2seq: Building datasets complete')
+if args.regen: alert.write('run_lm: Building datasets complete')
 
 print('Num examples: %s' % len(ds))
 print('Vocab length: %s' % len(ds.vocab))
 
-if not args.mismatch:
-    model = Seq2Seq(d_emb, d_enc, len(ds.vocab), d_dec, max_len, bos_idx=ds.vocab[ds.bos],
-                    context_size=d_mismatch_enc)
-else:
-    model = MismatchSeq2Seq(d_emb, d_enc, len(ds.vocab), d_dec, max_len, bos_idx=ds.vocab[ds.bos])
+model = Decoder(len(ds.vocab), d_emb, d_dec, (max_history+1) * max_len, d_context=0, bos_idx=ds.vocab[ds.bos])
 
 if args.restore and args.model_path is not None:
     print('Restoring model from save')
@@ -110,22 +102,13 @@ for epoch_idx in range(num_epochs):
     for i, data in enumerate(bar):
         data = [d.to(device) for d in data]
 
-        if args.mismatch:
-            history, response, chosen_response, match = data
-        else:
-            history, response = data
+        _, _, convo = data
 
-        logits = model(history, labels=response)
+        logits = model(None, labels=convo)
 
-        loss = ce(logits.view(-1, logits.shape[-1]), response.view(-1))
+        loss = ce(logits.view(-1, logits.shape[-1]), convo.view(-1))
         optim.zero_grad()
         loss.backward()
-
-        # if mismatch component exists, train mismatch simultaneously
-        if args.mismatch:
-            pred = model.mismatch(history, chosen_response)
-            mismatch_loss = bce(pred.view(-1), match.view(-1).float())
-            mismatch_loss.backward()
 
         optim.step()
 
@@ -135,20 +118,19 @@ for epoch_idx in range(num_epochs):
             with torch.no_grad():
                 # this code grabs a validation batch, or resets the val data loader once it reaches the end
                 try:
-                    history, response = next(valiter)
+                    history, response, convo = next(valiter)
                 except StopIteration:
                     valiter = iter(DataLoader(valds, batch_size=32, num_workers=0))
-                    history, response = next(valiter)
-                history = history.to(device)
-                response = response.to(device)
-                logits = model(history, labels=response)
-                loss = ce(logits.view(-1, logits.shape[-1]), response.view(-1))
+                    history, response, convo = next(valiter)
+                convo = convo.to(device)
+                logits = model(None, labels=convo)
+                loss = ce(logits.view(-1, logits.shape[-1]), convo.view(-1))
                 log_value('val_loss', loss.item(), epoch_idx * len(dl) + i)
 
         if (i % 1000 == 999 or i == len(dl) - 1) and args.model_path is not None:
             torch.save(model.state_dict(), args.model_path)
 
-if args.epochs > 0: alert.write('run_seq2seq: Training complete')
+if args.epochs > 0: alert.write('run_lm: Training complete')
 
 ######### EVALUATION ###################################################################################################
 
@@ -159,10 +141,10 @@ with torch.no_grad():
     # print examples
     for i, data in enumerate(dl):
         data = [d.to(device) for d in data]
-        history, response = data
+        history, response, convo = data
         if i > num_print:
             break
-        logits, preds = model(history, sample_func=random_sample)
+        logits, preds = model(prelabels=history, sample_func=random_sample)
         for j in range(preds.shape[0]):
             np_pred = preds[j].cpu().numpy()
             np_context = history[j].cpu().numpy()
@@ -187,8 +169,8 @@ with torch.no_grad():
             break
 
         data = [d.to(device) for d in data]
-        history, response = data
-        logits = model(history, labels=response)
+        history, response, convo = data
+        logits = model(None, prelabels=history, labels=response)
         loss = ce(logits.view(-1, logits.shape[-1]), response.view(-1))
         entropies.append(loss)
 

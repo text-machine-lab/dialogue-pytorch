@@ -16,7 +16,7 @@ from nlputils import Vocab, convert_str_to_npy, convert_npy_to_str, raw_count
 class UbuntuCorpus(Dataset):
     def __init__(self, source_dir, tmp_dir, vocab_len, max_len, history_len,
                  max_examples=None, regen=False,
-                 mismatch=False, split_history=False, vocab=None):
+                 mismatch=False, concat_feature=False, split_history=False, vocab=None):
         """
         This class loads the Ubuntu dialogue corpus .csv file and builds a vocabulary from it.
         This class is also able to be used by a dataloader to dispense individual (history, response)
@@ -35,7 +35,8 @@ class UbuntuCorpus(Dataset):
         :param max_examples_for_vocab: only use this many examples to build vocabulary
         :param regen: if true, regenerate vocab and line count no matter what
         :param mismatch: if true, dispense (history, response, match) tuples
-        :param split_history: if true, history matrix is shape (history_len, max_len) where each utterance is separated
+        :param concat_feature: if true, return (history, response, convo) tuple where convo is concatenated history and response
+        :param split_history: if true, history matrix s shape (history_len, max_len) where each utterance is separated
         :param vocab: if provided, use external vocabulary instead of generating one (for validation sets, etc)
         """
         super().__init__()
@@ -47,6 +48,7 @@ class UbuntuCorpus(Dataset):
         self.max_len = max_len
         self.history_len = history_len
         self.split_history = split_history
+        self.concat_feature = concat_feature
         self.max_examples = max_examples
         self.source_dir = source_dir
         self.vocab_len = vocab_len
@@ -109,6 +111,7 @@ class UbuntuCorpus(Dataset):
             print('Building dataset')
             ds_file = h5py.File(os.path.join(tmp_dir, 'ds.hdf5'), 'w')
             self.responses = ds_file.create_dataset('responses', [num_examples, self.max_len], int)
+            self.convos = ds_file.create_dataset('convos', [num_examples, (history_len+1)*max_len], int)
             # choose to split history by utterance
             if self.split_history:
                 self.histories = ds_file.create_dataset('histories', [num_examples, history_len, max_len], int)
@@ -125,9 +128,10 @@ class UbuntuCorpus(Dataset):
                         break
                     history, response, label = next(csv_f)
                     if label == '1':
-                        np_history, np_response = self.format_line_into_npy(history, response)
+                        np_history, np_response, np_convo = self.format_line_into_npy(history, response)
                         self.responses[idx] = np_response
                         self.histories[idx] = np_history
+                        self.convos[idx] = np_convo
                         idx += 1
                         bar.update(1)
         else:
@@ -137,16 +141,19 @@ class UbuntuCorpus(Dataset):
             ds_file = h5py.File(os.path.join(tmp_dir, 'ds.hdf5'), 'r')
             self.responses = ds_file['responses']
             self.histories = ds_file['histories']
+            self.convos = ds_file['convos']
 
         # dispense one example for testing
-        history, response = self[0]
+        history, response, convo = self[0]
         assert isinstance(history, np.ndarray)
         assert isinstance(response, np.ndarray)
+        assert isinstance(convo, np.ndarray)
         if split_history:
             assert history.shape == (self.history_len, self.max_len)
         else:
             assert history.shape == (self.history_len * self.max_len,)
         assert response.shape == (self.max_len,)
+        assert convo.shape == ((self.history_len+1) * self.max_len,)
 
         # if mismatch is true, we set it now after loading the first response
         self.mismatch = mismatch
@@ -196,9 +203,14 @@ class UbuntuCorpus(Dataset):
         """
         history = format_line(history)
         response = format_line(response)
+        convo = history + ' </s> ' + response
 
         np_response = convert_str_to_npy(response, self.vocab, self.max_len, eos=self.eos, pad=0,
                                          unk=self.unk)
+
+        convo_max_len = (self.history_len+1) * self.max_len
+
+        np_convo = convert_str_to_npy(convo, self.vocab, convo_max_len, eos=self.eos, pad=0, unk=self.unk)
 
         if not self.split_history:
             np_history = convert_str_to_npy(history, self.vocab, self.max_len * self.history_len,
@@ -218,7 +230,7 @@ class UbuntuCorpus(Dataset):
             np_pad = np.zeros([self.history_len - np_history.shape[0], self.max_len])
             np_history = np.concatenate([np_pad, np_history], axis=0)
 
-        return np_history, np_response
+        return np_history, np_response, np_convo
 
     def __len__(self):
         # only half of the examples are real (1), the rest are fake (0)
@@ -232,7 +244,10 @@ class UbuntuCorpus(Dataset):
         np_history = self.histories[index]
         np_response = self.responses[index]
         if not self.mismatch:
-            return np_history, np_response
+            if self.concat_feature:
+                return np_history, np_response, self.convos[index]
+            else:
+                return np_history, np_response
         else:
             match = random.getrandbits(1)
             np_chosen_response = self.responses[index - 1 + match]  # grab current response or last response is mismatch
@@ -259,14 +274,14 @@ if __name__ == '__main__':
     vocab_len = 50000
     max_len = 20
     history_len = 10
-    max_examples = None
+    max_examples = 1000
     mismatch = False
     split_history = False
 
     # problem: history cuts off front end, not tale end
 
     ds = UbuntuCorpus(args.source, args.save_path, vocab_len, max_len, history_len, max_examples=max_examples,
-                      regen=args.regenerate, mismatch=mismatch,
+                      regen=args.regenerate, concat_feature=True,
                       split_history=split_history)
 
     print('Dataset length: %s' % len(ds))
@@ -277,6 +292,10 @@ if __name__ == '__main__':
         result = ds[i]  # the index isn't used
         np_history = result[0]
         np_response = result[1]
+        np_convo = result[2]
+
+        convo = convert_npy_to_str(np_convo, ds.vocab, eos=ds.eos)
+        print('Convo: %s' % convo)
 
         if not split_history:
             history = convert_npy_to_str(np_history, ds.vocab, eos=ds.eos)

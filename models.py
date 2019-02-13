@@ -13,7 +13,9 @@ class MismatchSeq2Seq(nn.Module):
 
     def forward(self, x, labels=None, context=None, sample_func=None):
 
-        m_vector = self.mismatch.encode_message(x)
+        # do not send gradients decoder
+        with torch.no_grad():
+            m_vector = self.mismatch.encode_message(x)
 
         # allow user to condition the decoder on external context
         if context is not None:
@@ -27,12 +29,12 @@ class MismatchSeq2Seq(nn.Module):
 
 
 class Seq2Seq(nn.Module):
-    def __init__(self, d_emb, d_enc, d_vocab, d_dec, max_len, bos_idx, context_size=0):
+    def __init__(self, d_emb, d_enc, d_vocab, d_dec, max_len, bos_idx):
         super().__init__()
         self.encoder = Encoder(d_emb, d_enc, d_vocab)
-        self.decoder = Decoder(d_vocab, d_emb, d_dec, max_len, d_enc + context_size, bos_idx)
+        self.decoder = Decoder(d_vocab, d_emb, d_dec, max_len, d_enc, bos_idx)
 
-    def forward(self, x, labels=None, context=None, sample_func=None):
+    def forward(self, x, labels=None, sample_func=None):
         """
         Run a sequence-to-sequence model on input sequence. Model learns
         embeddings for vocabulary internally.
@@ -47,11 +49,7 @@ class Seq2Seq(nn.Module):
 
         e_states, e_final = self.encoder(x)
 
-        # allow user to condition the decoder on external context
-        if context is not None:
-            e_final = torch.cat([e_final, context], dim=-1)
-
-        return self.decoder(e_final, labels=labels, sample_func=sample_func)
+        return self.decoder(labels=labels, sample_func=sample_func, state=e_final)
 
 
 class Encoder(nn.Module):
@@ -88,47 +86,81 @@ def random_sample(x):
 class Decoder(nn.Module):
     def __init__(self, d_vocab, d_emb, d_dec, max_len, d_context, bos_idx):
         super().__init__()
+        self.d_vocab = d_vocab
         self.embs = nn.Embedding(d_vocab, d_emb)
-        self.rnn = nn.GRUCell(d_emb + d_context, d_dec)
+        self.rnn = nn.GRU(d_emb + d_context, d_dec, batch_first=True)
         self.init = nn.Parameter(torch.zeros(1, d_dec), requires_grad=True)
         self.bos_idx = nn.Parameter(torch.tensor([bos_idx]), requires_grad=False)
         self.linear = nn.Linear(d_dec, d_vocab)
         self.max_len = max_len
 
-    def forward(self, context, labels=None, sample_func=None):
-        if isinstance(context, int):
-            # allow decoder to function as NLM
-            b = context
-            context = None
-        else:
-            # number of contexts denotes batch size
-            b = context.shape[0]
+    def forward(self, prelabels=None, labels=None, state=None, sample_func=None, batch_size=None):
+        """
+        Run decoder on input context with optional conditioning on labels and prelabels
+        :param context: None if no context, otherwise concatenated as input to decoder, or integer b for unconditional generation
+        :param prelabels: run decoder on these labels before running on labels (complete the sequence)
+        :param labels: labels conditioned on at each timestep in next-prediction task (used during training)
+        :param sample_func: specify a function logits (batch_size, vocab_size)--> predictions (batch_size,)
+        for model sampling. Default: argmax
+        :return: If labels are provided, returns logits tensor (batch_size, num_steps, vocab_size). If labels are not provided,
+        returns predictions tensor (batch_size, num_steps) using provided sampling function.
+        """
+        if batch_size is None:
+            batch_size = labels.shape[0]
+
+        if state is None:
+            state = self.init.expand(batch_size, -1).contiguous()
+
+        state = state.unsqueeze(0)
 
         if sample_func is None:
             sample_func = partial(torch.argmax, dim=-1)
 
-        t = self.max_len
-        state = self.init.expand(b, -1)  # repeat across batch dimension
-        word = self.embs(self.bos_idx.expand(b))
-        all_logits = []
-        all_preds = []
-        for step in range(t):
-            if context is not None:
-                word = torch.cat([word, context], dim=-1)
-            state = self.rnn(word, state)
-            logits = self.linear(state)
-            all_logits.append(logits)
-            if labels is not None:
-                word = self.embs(labels[:, step])
-            else:
-                pred = sample_func(logits)
-                word = self.embs(pred)
-                all_preds.append(pred)
-        logits = torch.stack(all_logits, dim=1)
-        if labels is None:
-            return logits, torch.stack(all_preds, dim=1)
-        else:
+        init = self.embs(self.bos_idx.expand(batch_size).unsqueeze(1))
+
+        # give ability to run model on prelabels before actual labels
+        # we run on the prelabels, then extract the final states after reading all
+        # non-padding words
+        if prelabels is not None:
+            labels = labels[:-1] # we don't take last word as input
+            in_embs = self.embs(labels)
+            in_embs = torch.cat([init, in_embs], dim=-1)
+            outputs, _ = self.rnn(in_embs, state)
+            logits = self.linear(outputs)
+            prelabel_lens = (prelabels != 0).sum(dim=1)
+            state = batch_index(prestates, prelabel_lens)
+
+        if labels is not None:
+            labels = labels[:, :-1] # we don't take last word as input
+            in_embs = self.embs(labels)
+            in_embs = torch.cat([init, in_embs], dim=-1)
+            outputs, _ = self.rnn(in_embs, state)
+            logits = self.linear(outputs)
+
             return logits
+
+        # else:
+        #     word = self.embs(self.bos_idx.expand(batch_size))
+        #     all_logits = []
+        #     all_preds = []
+        #     for step in range(t):
+        #         state = self.rnn(word, state)
+        #         logits = self.linear(state)
+        #         all_logits.append(logits)
+        #         if labels is not None:
+        #             word = self.embs(labels[:, step])
+        #         else:
+        #             pred = sample_func(logits)
+        #             word = self.embs(pred)
+        #             all_preds.append(pred)
+        #     logits = torch.stack(all_logits, dim=1)
+        #     if labels is None:
+        #         return logits, torch.stack(all_preds, dim=1)
+        #     else:
+        #         return logits
+
+
+          # repeat across batch dimensions
 
 
 
@@ -174,8 +206,27 @@ class MismatchClassifier(nn.Module):
             return comparison
 
 
+def batch_index(x, i):
+    b = x.shape[0]
+    t = x.shape[1]
+    e = x.shape[2]
+    x_flat = x.view(b * t, e)
+    r = torch.arange(b) * t  # index adjustments
+    i_adj = i + r
+    return x_flat[i_adj].view(b, e)
 
 
+if __name__ == '__main__':
+
+    # test
+    x = torch.rand(32, 20, 200)
+    i = (torch.rand(32) * 20).long()
+
+    result = batch_index(x, i)
+
+    assert result.shape == (x.shape[0], x.shape[2])
+    for j in range(x.shape[0]):
+        assert torch.equal(x[j, i[j]], result[j])
 
 
 
