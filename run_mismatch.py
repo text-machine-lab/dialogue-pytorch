@@ -14,7 +14,7 @@ import numpy as np
 from glove import GloveLoader
 import os
 
-from tg_alert import TelegramAlert
+from tgalert import TelegramAlert
 alert = TelegramAlert()
 
 try:

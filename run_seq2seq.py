@@ -15,7 +15,7 @@ from nlputils import convert_npy_to_str
 from tensorboard_logger import configure, log_value
 from tqdm import tqdm
 
-from tg_alert import TelegramAlert
+from tgalert import TelegramAlert
 alert = TelegramAlert()
 
 parser = argparse.ArgumentParser(description='Run seq2seq model on Opensubtitles conversations')

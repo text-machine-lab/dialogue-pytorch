@@ -16,7 +16,7 @@ from nlputils import Vocab, convert_str_to_npy, convert_npy_to_str, raw_count
 class UbuntuCorpus(Dataset):
     def __init__(self, source_dir, tmp_dir, vocab_len, max_len, history_len,
                  max_examples=None, regen=False,
-                 mismatch=False, concat_feature=False, split_history=False, vocab=None):
+                 mismatch=False, concat_feature=False, split_history=False, vocab=None, num_splits=None):
         """
         This class loads the Ubuntu dialogue corpus .csv file and builds a vocabulary from it.
         This class is also able to be used by a dataloader to dispense individual (history, response)
@@ -48,6 +48,7 @@ class UbuntuCorpus(Dataset):
         self.max_len = max_len
         self.history_len = history_len
         self.split_history = split_history
+        self.num_splits = None
         self.concat_feature = concat_feature
         self.max_examples = max_examples
         self.source_dir = source_dir
@@ -59,6 +60,8 @@ class UbuntuCorpus(Dataset):
         self.url = '<url>'
         self.vocab = vocab
         self.mismatch = False
+
+        assert split_history is False or num_splits is not None
 
         if not os.path.exists(tmp_dir) or regen:
 
@@ -111,12 +114,12 @@ class UbuntuCorpus(Dataset):
             print('Building dataset')
             ds_file = h5py.File(os.path.join(tmp_dir, 'ds.hdf5'), 'w')
             self.responses = ds_file.create_dataset('responses', [num_examples, self.max_len], int)
-            self.convos = ds_file.create_dataset('convos', [num_examples, (history_len+1)*max_len], int)
+            self.convos = ds_file.create_dataset('convos', [num_examples, history_len + max_len], int)
             # choose to split history by utterance
             if self.split_history:
-                self.histories = ds_file.create_dataset('histories', [num_examples, history_len, max_len], int)
+                self.histories = ds_file.create_dataset('histories', [num_examples, num_splits, history_len], int)
             else:
-                self.histories = ds_file.create_dataset('histories', [num_examples, history_len*max_len], int)
+                self.histories = ds_file.create_dataset('histories', [num_examples, history_len], int)
 
             idx = 0  # index in dataset
             with open(source_dir, 'r') as f:
@@ -149,11 +152,11 @@ class UbuntuCorpus(Dataset):
         assert isinstance(response, np.ndarray)
         assert isinstance(convo, np.ndarray)
         if split_history:
-            assert history.shape == (self.history_len, self.max_len)
+            assert history.shape == (num_splits, history_len)
         else:
-            assert history.shape == (self.history_len * self.max_len,)
+            assert history.shape == (history_len,)
         assert response.shape == (self.max_len,)
-        assert convo.shape == ((self.history_len+1) * self.max_len,)
+        assert convo.shape == (history_len + self.max_len,)
 
         # if mismatch is true, we set it now after loading the first response
         self.mismatch = mismatch
@@ -208,26 +211,32 @@ class UbuntuCorpus(Dataset):
         np_response = convert_str_to_npy(response, self.vocab, self.max_len, eos=self.eos, pad=0,
                                          unk=self.unk)
 
-        convo_max_len = (self.history_len+1) * self.max_len
+        convo_max_len = self.history_len + self.max_len
 
-        np_convo = convert_str_to_npy(convo, self.vocab, convo_max_len, eos=self.eos, pad=0, unk=self.unk)
+        # note: if we are not splitting history, we right align the history, left align the response,
+        # and concat them together to get the convo. So all convos are aligned at the start of the final
+        # utterance.
+        # if we split history, we can't just concat the history and response. Instead, we left align the
+        # concat of history and response, so that all convos are aligned on the first token.
 
         if not self.split_history:
-            np_history = convert_str_to_npy(history, self.vocab, self.max_len * self.history_len,
+            np_history = convert_str_to_npy(history, self.vocab, self.history_len,
                                             eos=self.eos, pad=0,
-                                            unk=self.unk)
+                                            unk=self.unk, left_pad=True)  # pad from the left!!!
+            np_convo = np.concatenate([np_history, np_response], axis=0)
         else:
+            np_convo = convert_str_to_npy(convo, self.vocab, convo_max_len, eos=self.eos, pad=0, unk=self.unk)
             # we want each utterance to be on a separate line
             hist_utters = history.split('</s>')
-            hist_utters = hist_utters[-self.history_len:]
+            hist_utters = hist_utters[-self.num_splits:]
             hist_utter_npys = []
             for utterance in hist_utters:
-                np_utter = convert_str_to_npy(utterance, self.vocab, self.max_len, eos=self.eos, pad=0,
+                np_utter = convert_str_to_npy(utterance, self.vocab, self.history_len, eos=self.eos, pad=0,
                                               unk=self.unk)
                 hist_utter_npys.append(np_utter)
             np_history = np.stack(hist_utter_npys, axis=0)
             # we need add pad utterances to get array up to final shape (history_len, max_len)
-            np_pad = np.zeros([self.history_len - np_history.shape[0], self.max_len])
+            np_pad = np.zeros([self.num_splits - np_history.shape[0], self.history_len])
             np_history = np.concatenate([np_pad, np_history], axis=0)
 
         return np_history, np_response, np_convo

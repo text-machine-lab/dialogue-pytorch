@@ -108,7 +108,7 @@ def raw_count(filename):
     return lines
 
 
-def convert_str_to_npy(string, vocab, max_len, eos=None, pad=0, unk=None):
+def convert_str_to_npy(string, vocab, max_len, eos=None, pad=0, unk=None, left_pad=False):
     """Convert a string into a numpy vector containing
     indices which represent each token, as indicated by a vocabulary. If
     unk token is not provided, throws error if token does not appear in vocab.
@@ -124,13 +124,18 @@ def convert_str_to_npy(string, vocab, max_len, eos=None, pad=0, unk=None):
         string = string.split()
     if eos is not None:
         string.append(eos)
+    shift = max(max_len - len(string), 0)
     output = np.full(max_len, pad, np.int)
     for i, token in enumerate(string):
         if i < max_len:
+            if left_pad:
+                ptr = shift + i  # if left pad, shift all indices over to right side
+            else:
+                ptr = i
             if token in vocab:
-                output[i] = vocab[token]
+                output[ptr] = vocab[token]
             elif unk is not None:
-                output[i] = vocab[unk]
+                output[ptr] = vocab[unk]
             else:
                 raise ValueError('Unknown token not specified. Tokens must be in vocabulary.')
         else:

@@ -94,7 +94,7 @@ class Decoder(nn.Module):
         self.linear = nn.Linear(d_dec, d_vocab)
         self.max_len = max_len
 
-    def forward(self, prelabels=None, labels=None, state=None, sample_func=None, batch_size=None):
+    def forward(self, prelabels=None, labels=None, state=None, sample_func=None, batch_size=None, num_steps=None):
         """
         Run decoder on input context with optional conditioning on labels and prelabels
         :param context: None if no context, otherwise concatenated as input to decoder, or integer b for unconditional generation
@@ -106,62 +106,67 @@ class Decoder(nn.Module):
         returns predictions tensor (batch_size, num_steps) using provided sampling function.
         """
         if batch_size is None:
-            batch_size = labels.shape[0]
-
+            if labels is not None:
+                batch_size = labels.shape[0]
+            else:
+                batch_size = prelabels.shape[0]
+        if num_steps is None:
+            num_steps = self.max_len
         if state is None:
-            state = self.init.expand(batch_size, -1).contiguous()
-
-        state = state.unsqueeze(0)
+            state = self.init.expand(batch_size, -1).contiguous()  # bxh
 
         if sample_func is None:
             sample_func = partial(torch.argmax, dim=-1)
 
-        init = self.embs(self.bos_idx.expand(batch_size).unsqueeze(1))
+        init = self.embs(self.bos_idx.expand(batch_size).unsqueeze(1))  # bx1xh
 
         # give ability to run model on prelabels before actual labels
         # we run on the prelabels, then extract the final states after reading all
         # non-padding words
         if prelabels is not None:
-            labels = labels[:-1] # we don't take last word as input
-            in_embs = self.embs(labels)
-            in_embs = torch.cat([init, in_embs], dim=-1)
-            outputs, _ = self.rnn(in_embs, state)
-            logits = self.linear(outputs)
-            prelabel_lens = (prelabels != 0).sum(dim=1)
-            state = batch_index(prestates, prelabel_lens)
+            state = state.unsqueeze(0)  # 1 x b x h
+            in_embs = self.embs(prelabels)  # b x t x w
+            in_embs = torch.cat([init, in_embs], dim=1)  # b x (t+1) x w
+            outputs, _ = self.rnn(in_embs, state)  # b x (t+1) x h
+            prelabel_lens = (prelabels != 0).sum(dim=1)  # b
+            final_states = batch_index3d(outputs.contiguous(), prelabel_lens)  # b x h
+            final_states = outputs[:, -1, :]
+            state = final_states  # b x h
 
         if labels is not None:
-            labels = labels[:, :-1] # we don't take last word as input
-            in_embs = self.embs(labels)
-            in_embs = torch.cat([init, in_embs], dim=-1)
-            outputs, _ = self.rnn(in_embs, state)
-            logits = self.linear(outputs)
-
+            labels_no_last = labels[:, :-1] # b x (t-1) # we don't take last word as input
+            in_embs = self.embs(labels_no_last)  # b x (t-1) x w
+            # don't append bos if we have already read it with prelabels
+            if prelabels is None:
+                in_embs = torch.cat([init, in_embs], dim=1)  # b x t x w
+            outputs, _ = self.rnn(in_embs, state.unsqueeze(0))  # b x (t-1) x h OR b x t x h
+            if prelabels is not None:
+                outputs = torch.cat([state.unsqueeze(1), outputs], dim=1)  # b x t x h
+            logits = self.linear(outputs)  # b x t x v
             return logits
+        else:
+            all_logits = []
+            all_preds = []
+            if prelabels is None:
+                word = init.squeeze(1)  # b x w
+            else:
+                logits = self.linear(state)  # b x v
+                all_logits.append(logits)
+                pred = sample_func(logits)  # b
+                all_preds.append(pred)
+                word = self.embs(pred)  # b x w
+            state = state.unsqueeze(0)
 
-        # else:
-        #     word = self.embs(self.bos_idx.expand(batch_size))
-        #     all_logits = []
-        #     all_preds = []
-        #     for step in range(t):
-        #         state = self.rnn(word, state)
-        #         logits = self.linear(state)
-        #         all_logits.append(logits)
-        #         if labels is not None:
-        #             word = self.embs(labels[:, step])
-        #         else:
-        #             pred = sample_func(logits)
-        #             word = self.embs(pred)
-        #             all_preds.append(pred)
-        #     logits = torch.stack(all_logits, dim=1)
-        #     if labels is None:
-        #         return logits, torch.stack(all_preds, dim=1)
-        #     else:
-        #         return logits
-
-
-          # repeat across batch dimensions
-
+            for step in range(num_steps):
+                word = word.unsqueeze(1)  # 1 x b x w
+                _, state = self.rnn(word, state)  # 1 x b x h
+                logits = self.linear(state.squeeze(0))  # b x v
+                all_logits.append(logits)
+                pred = sample_func(logits)  # b
+                word = self.embs(pred)  # b x w
+                all_preds.append(pred)
+            logits = torch.stack(all_logits, dim=1)
+            return logits, torch.stack(all_preds, dim=1)
 
 
 class MismatchClassifier(nn.Module):
@@ -206,14 +211,23 @@ class MismatchClassifier(nn.Module):
             return comparison
 
 
-def batch_index(x, i):
+def batch_index3d(x, i):
     b = x.shape[0]
     t = x.shape[1]
     e = x.shape[2]
     x_flat = x.view(b * t, e)
-    r = torch.arange(b) * t  # index adjustments
+    r = torch.arange(b).to(x.device) * t  # index adjustments
     i_adj = i + r
     return x_flat[i_adj].view(b, e)
+
+
+def batch_index(x, i):
+    b = x.shape[0]
+    t = x.shape[1]
+    x_flat = x.view(b * t)
+    r = torch.arange(b) * t  # index adjustments
+    i_adj = i + r
+    return x_flat[i_adj].view(b)
 
 
 if __name__ == '__main__':

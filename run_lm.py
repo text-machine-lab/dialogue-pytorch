@@ -6,6 +6,7 @@ from datetime import datetime
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from os_ds import OpenSubtitlesDataset
@@ -14,9 +15,7 @@ from models import Seq2Seq, random_sample, Decoder
 from nlputils import convert_npy_to_str
 from tensorboard_logger import configure, log_value
 from tqdm import tqdm
-
-from tg_alert import TelegramAlert
-alert = TelegramAlert()
+from tgalert import TelegramAlert
 
 parser = argparse.ArgumentParser(description='Run seq2seq model on Opensubtitles conversations')
 parser.add_argument('--source', default=None, help='Directory to look for data files')
@@ -28,30 +27,34 @@ parser.add_argument('--epochs', default=1, action='store', type=int, help='Numbe
 parser.add_argument('--restore', default=False, action='store_true', help='Set to restore model from save')
 parser.add_argument('--num_print', default='1', help='Number of batches to print')
 parser.add_argument('--run', default=None, help='Path to save run values for viewing with Tensorboard')
+parser.add_argument('--tgdisable', default=False, action='store_true', help='If true, suppress Telegram alerts')
+parser.add_argument('--max_examples', default=None, help='Number of examples to use when training on dataset')
 # parser.add_argument('--dataset', default='ubuntu', help='Choose either opensubtitles or ubuntu dataset to train')
 parser.add_argument('--val', default=None, help='Validation set to use for model evaluation')
 args = parser.parse_args()
+
+alert = TelegramAlert(disable=args.tgdisable)
 
 device = torch.device(args.device if torch.cuda.is_available() else "cpu")
 
 if args.run is not None and args.epochs > 0:
     configure(os.path.join(args.run, str(datetime.now())), flush_secs=5)
 
-max_history = 10
-max_len = 20
-max_examples = None
+history_len = 170
+max_len = 30
+max_examples = None if args.max_examples is None else int(args.max_examples)
 max_vocab_examples = None
 max_vocab = 50000
 num_epochs = args.epochs
 num_print = int(args.num_print)
 d_emb = 200
-d_dec = 300
+d_dec = 400
 lr = .0001
 
 ########### DATASET AND MODEL CREATION #################################################################################
 
 print('Using Ubuntu dialogue corpus')
-ds = UbuntuCorpus(args.source, args.temp, max_vocab, max_len, max_history,
+ds = UbuntuCorpus(args.source, args.temp, max_vocab, max_len, history_len,
                   concat_feature=True, max_examples=max_examples, regen=args.regen)
 
 print('Printing statistics for training set')
@@ -62,7 +65,7 @@ valds = None
 if args.val is not None:
     print('Using validation set for evaluation')
     val_temp_dir = os.path.join(args.temp, 'validation')
-    valds = UbuntuCorpus(args.val, val_temp_dir, max_vocab, max_len, max_history, concat_feature=True, regen=args.regen,
+    valds = UbuntuCorpus(args.val, val_temp_dir, max_vocab, max_len, history_len, concat_feature=True, regen=args.regen,
                       vocab=ds.vocab)
     print('Printing statistics for validation set')
     valds.print_statistics()
@@ -74,7 +77,7 @@ if args.regen: alert.write('run_lm: Building datasets complete')
 print('Num examples: %s' % len(ds))
 print('Vocab length: %s' % len(ds.vocab))
 
-model = Decoder(len(ds.vocab), d_emb, d_dec, (max_history+1) * max_len, d_context=0, bos_idx=ds.vocab[ds.bos])
+model = Decoder(len(ds.vocab), d_emb, d_dec, history_len + max_len, d_context=0, bos_idx=ds.vocab[ds.bos])
 
 if args.restore and args.model_path is not None:
     print('Restoring model from save')
@@ -134,6 +137,36 @@ if args.epochs > 0: alert.write('run_lm: Training complete')
 
 ######### EVALUATION ###################################################################################################
 
+def approx_equal(x, y, e=1e-3):
+    return torch.lt(torch.abs(x-y), e).all()
+
+def adjust_lm_logits(logits, vocab):
+    """Take probability mass from </s> symbol and place it on the <eos> symbol."""
+    # compute probabilities from logits
+    probs = F.softmax(logits, dim=-1)  # b x t x v
+    # transfer mass from <\s> to <eos>
+    slashsprobs = probs[:, :, vocab['</s>']]  # b x t
+    probs[:, :, vocab['<eos>']] = probs[:, :, vocab['<eos>']] + slashsprobs  # b x t
+    probs[:, :, vocab['</s>']] = probs[:, :, vocab['</s>']] - slashsprobs  # b x t
+    ones = torch.ones(probs.shape[0], probs.shape[1]).to(logits.device)
+    dist_sum = probs.sum(dim=-1)
+    assert approx_equal(ones, dist_sum)
+    # take the log to get logits back
+    backlogits = torch.log(probs)
+    assert backlogits.ne(logits).all()
+    # return logits
+    return backlogits
+
+def replace_eos_slashs(utterances, vocab):
+    """For each utterance, finds all <eos> tokens and replaces them
+    with </s>. Tested."""
+    tk_eos = vocab['<eos>']
+    tk_s = vocab['</s>']
+    eos_tokens = (utterances == tk_eos).long()  # 1 if token is eos
+    s_tokens = eos_tokens * tk_s  # map where 0 is normal token and tk_s has location of eos with index of /s
+    return utterances * (1-eos_tokens) + s_tokens  # set all eos to zero, then add /s token map
+
+
 with torch.no_grad():
     print('Printing generated examples')
     dl = DataLoader(valds, batch_size=5, num_workers=0)
@@ -144,7 +177,8 @@ with torch.no_grad():
         history, response, convo = data
         if i > num_print:
             break
-        logits, preds = model(prelabels=history, sample_func=random_sample)
+        history_no_eos = replace_eos_slashs(history, ds.vocab)
+        logits, preds = model(prelabels=history_no_eos, sample_func=random_sample)
         for j in range(preds.shape[0]):
             np_pred = preds[j].cpu().numpy()
             np_context = history[j].cpu().numpy()
@@ -158,7 +192,7 @@ with torch.no_grad():
             print()
 
     print('Evaluating perplexity')
-    dl = DataLoader(valds, batch_size=32, num_workers=0)
+    dl = DataLoader(valds, batch_size=3, num_workers=0)
     total_batches = min(len(dl), 1500)
     entropies = []
     bar = tqdm(dl, total=total_batches)
@@ -170,7 +204,9 @@ with torch.no_grad():
 
         data = [d.to(device) for d in data]
         history, response, convo = data
-        logits = model(None, prelabels=history, labels=response)
+        history_no_eos = replace_eos_slashs(history, ds.vocab)
+        logits = model(prelabels=history_no_eos, labels=response)
+        logits = adjust_lm_logits(logits, ds.vocab)
         loss = ce(logits.view(-1, logits.shape[-1]), response.view(-1))
         entropies.append(loss)
 
