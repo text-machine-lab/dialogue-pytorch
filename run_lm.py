@@ -157,15 +157,46 @@ def adjust_lm_logits(logits, vocab):
     # return logits
     return backlogits
 
-def replace_eos_slashs(utterances, vocab):
-    """For each utterance, finds all <eos> tokens and replaces them
-    with </s>. Tested."""
+def replace_eos_slashs(utterances, vocab, reverse=False):
+    """
+    For each utterance, finds all <eos> tokens and replaces them
+    with </s>. Tested.
+    :param utterances: (batch_size, max_len) tensor with indices
+    :param vocab: Vocab object containing bi-directional mapping tokens <--> indices
+    :param reverse: if reverse, replace slashs with eos
+    :return:
+    """
     tk_eos = vocab['<eos>']
     tk_s = vocab['</s>']
+
+    if reverse:
+        tmp = tk_eos
+        tk_eos = tk_s
+        tk_s = tmp
+
     eos_tokens = (utterances == tk_eos).long()  # 1 if token is eos
     s_tokens = eos_tokens * tk_s  # map where 0 is normal token and tk_s has location of eos with index of /s
     return utterances * (1-eos_tokens) + s_tokens  # set all eos to zero, then add /s token map
 
+
+
+def gather_response(convo, split_indices, max_len):
+    """
+    Extract all tokens in convo that appear after index in split_indices (batched). Return
+    tensor containing these tokens extracted.
+
+    :param convo: (batch_size, convo_len) tensor containing token indices
+    :param split_indices: (batch_size,) tensor, for each example giving the index of the first token to extract
+    :param max_len: maximum number of 1's in a row of the mask, maximum extracted response
+    :return: (batch_size, max_len) tensor containing extracted indices
+    """
+    batch_size = convo.shape[0]
+    convo_len = convo.shape[1]
+    result = torch.zeros([batch_size, max_len]).long()
+    for i in range(batch_size):
+        response_len = min(convo_len - split_indices[i], max_len)
+        result[i, :response_len] = convo[i, split_indices[i]:split_indices[i] + response_len]
+    return result
 
 with torch.no_grad():
     print('Printing generated examples')
@@ -177,16 +208,32 @@ with torch.no_grad():
         history, response, convo = data
         if i > num_print:
             break
+
+        # here we remove eos from the history and replace it with </s> (end of utterance)
         history_no_eos = replace_eos_slashs(history, ds.vocab)
-        logits, preds = model(prelabels=history_no_eos, sample_func=random_sample)
+        # we will ask the model to fill in the rest of the conversation (i.e. the response)
+        response_space = torch.zeros([history_no_eos.shape[0], max_len]).long().to(device)
+        # we create space to fill in the response
+        convo_incomplete = torch.cat([history_no_eos, response_space], dim=1)
+        logits, preds = model.complete(convo_incomplete, sample_func=random_sample)
+        history_lens = (history_no_eos != 0).long().sum(dim=1)
+        response_preds = gather_response(preds, history_lens, max_len)
+        response_preds = replace_eos_slashs(response_preds, ds.vocab, reverse=True)
+        # pred represents the whole completed conversation
+        # now we need to remove the response from the conversation
+
+
         for j in range(preds.shape[0]):
-            np_pred = preds[j].cpu().numpy()
+            np_pred = response_preds[j].cpu().numpy()
+            np_complete_convo = preds[j].cpu().numpy()
             np_context = history[j].cpu().numpy()
             np_target = response[j].cpu().numpy()
             context = convert_npy_to_str(np_context, valds.vocab, valds.eos)
+            complete_convo = convert_npy_to_str(np_complete_convo, valds.vocab, valds.eos)
             pred = convert_npy_to_str(np_pred, valds.vocab, valds.eos)
             target = convert_npy_to_str(np_target, valds.vocab, valds.eos)
             print('History: %s' % context)
+            print('Completed convo: %s' % complete_convo)
             print('Prediction: %s' % pred)
             print('Target: %s' % target)
             print()
@@ -205,6 +252,7 @@ with torch.no_grad():
         data = [d.to(device) for d in data]
         history, response, convo = data
         history_no_eos = replace_eos_slashs(history, ds.vocab)
+
         logits = model(prelabels=history_no_eos, labels=response)
         logits = adjust_lm_logits(logits, ds.vocab)
         loss = ce(logits.view(-1, logits.shape[-1]), response.view(-1))

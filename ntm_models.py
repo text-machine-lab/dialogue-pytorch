@@ -8,17 +8,16 @@ from ntm.aio import EncapsulatedNTM  # found in the pytorch-ntm Github repo
 
 
 class Decoder(nn.Module):
-    def __init__(self, d_vocab, d_emb, d_dec, max_len, d_context, bos_idx, num_inputs, num_outputs,
-                 controller_size, controller_layers, num_heads, N, M, seg_size=10):
+    def __init__(self, d_vocab, d_emb, d_dec, max_len, d_context, bos_idx, controller_layers, num_heads, N, M, seg_size=10):
         super().__init__()
         self.d_vocab = d_vocab
         self.seg_size = seg_size
         self.embs = nn.Embedding(d_vocab, d_emb)
         self.rnn = nn.GRU(d_emb + d_context, d_dec, batch_first=True)
-        self.ntm = EncapsulatedNTM(num_inputs, num_outputs, controller_size, controller_layers, num_heads, N, M)
+        self.ntm = EncapsulatedNTM(d_dec, d_dec, d_dec, controller_layers, num_heads, N, M)
         self.init = nn.Parameter(torch.zeros(1, d_dec), requires_grad=True)
         self.bos_idx = nn.Parameter(torch.tensor([bos_idx]), requires_grad=False)
-        self.linear = nn.Linear(d_dec, d_vocab)
+        self.out_layer = nn.Linear(d_dec, d_vocab)
         self.max_len = max_len
 
     def forward(self, prelabels=None, labels=None, state=None, sample_func=None, batch_size=None, num_steps=None):
@@ -57,19 +56,35 @@ class Decoder(nn.Module):
             outputs, _ = self.rnn(in_embs, state)  # b x (t+1) x h
             prelabel_lens = (prelabels != 0).sum(dim=1)  # b
             #final_states = batch_index3d(outputs.contiguous(), prelabel_lens)  # b x h
-            final_states = outputs[:, -1, :]
-            state = final_states  # b x h
+            final_state = outputs[:, -1, :]
+            state = final_state  # b x h
 
         if labels is not None:
-            labels_no_last = labels[:, :-1] # b x (t-1) # we don't take last word as input
-            in_embs = self.embs(labels_no_last)  # b x (t-1) x w
-            # don't append bos if we have already read it with prelabels
-            if prelabels is None:
-                in_embs = torch.cat([init, in_embs], dim=1)  # b x t x w
-            outputs, _ = self.rnn(in_embs, state.unsqueeze(0))  # b x (t-1) x h OR b x t x h
-            if prelabels is not None:
-                outputs = torch.cat([state.unsqueeze(1), outputs], dim=1)  # b x t x h
-            logits = self.linear(outputs)  # b x t x v
+            ntm_state = torch.zeros_as(state).to(state.device)
+
+            labels_no_last = labels[:, :-1]  # b x (t-1) # we don't take last word as input
+            num_slices = labels.shape[1] // self.seg_size
+            all_logit_slices = []
+            for slice in range(num_slices):
+                labels_slice = labels_no_last[:, slice * self.seg_size:slice*self.seg_size+self.seg_size]
+
+                in_embs = self.embs(labels_slice)  # b x (t-1) x w
+                if slice==0 and prelabels is None:  # add bos index on first iteration
+                    in_embs = torch.cat([init, in_embs], dim=1)  # b x t x w
+                exp_ntm_state = torch.expand(ntm_state.unsqueeze(1), [-1, labels.shape[1], -1])  # b x t x h
+                rnn_input = torch.cat([in_embs, exp_ntm_state], dim=-1)
+                # don't append bos if we have already read it with prelabels
+                outputs, _ = self.rnn(rnn_input, state.unsqueeze(0))  # b x (t-1) x h OR b x t x h
+                state = outputs[:, -1, :]
+                # read and write from NTM
+                ntm_state = self.ntm(state)
+
+                if prelabels is not None:
+                    outputs = torch.cat([state.unsqueeze(1), outputs], dim=1)  # b x t x h
+                logits = self.out_layer(outputs)  # b x t x v
+                all_logit_slices.append(logits)
+            logits = torch.cat(all_logit_slices, dim=1)
+
             return logits
         else:
             all_logits = []
@@ -77,7 +92,7 @@ class Decoder(nn.Module):
             if prelabels is None:
                 word = init.squeeze(1)  # b x w
             else:
-                logits = self.linear(state)  # b x v
+                logits = self.out_layer(state)  # b x v
                 all_logits.append(logits)
                 pred = sample_func(logits)  # b
                 all_preds.append(pred)
@@ -87,7 +102,7 @@ class Decoder(nn.Module):
             for step in range(num_steps):
                 word = word.unsqueeze(1)  # 1 x b x w
                 _, state = self.rnn(word, state)  # 1 x b x h
-                logits = self.linear(state.squeeze(0))  # b x v
+                logits = self.out_layer(state.squeeze(0))  # b x v
                 all_logits.append(logits)
                 pred = sample_func(logits)  # b
                 word = self.embs(pred)  # b x w

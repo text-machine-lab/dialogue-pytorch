@@ -213,6 +213,8 @@ class UbuntuCorpus(Dataset):
 
         convo_max_len = self.history_len + self.max_len
 
+        np_convo = convert_str_to_npy(convo, self.vocab, convo_max_len, eos=self.eos, pad=0, unk=self.unk)
+
         # note: if we are not splitting history, we right align the history, left align the response,
         # and concat them together to get the convo. So all convos are aligned at the start of the final
         # utterance.
@@ -222,10 +224,8 @@ class UbuntuCorpus(Dataset):
         if not self.split_history:
             np_history = convert_str_to_npy(history, self.vocab, self.history_len,
                                             eos=self.eos, pad=0,
-                                            unk=self.unk, left_pad=True)  # pad from the left!!!
-            np_convo = np.concatenate([np_history, np_response], axis=0)
+                                            unk=self.unk)  # pad from the left!!!
         else:
-            np_convo = convert_str_to_npy(convo, self.vocab, convo_max_len, eos=self.eos, pad=0, unk=self.unk)
             # we want each utterance to be on a separate line
             hist_utters = history.split('</s>')
             hist_utters = hist_utters[-self.num_splits:]

@@ -130,43 +130,59 @@ class Decoder(nn.Module):
             outputs, _ = self.rnn(in_embs, state)  # b x (t+1) x h
             prelabel_lens = (prelabels != 0).sum(dim=1)  # b
             final_states = batch_index3d(outputs.contiguous(), prelabel_lens)  # b x h
-            final_states = outputs[:, -1, :]
             state = final_states  # b x h
 
-        if labels is not None:
-            labels_no_last = labels[:, :-1] # b x (t-1) # we don't take last word as input
-            in_embs = self.embs(labels_no_last)  # b x (t-1) x w
-            # don't append bos if we have already read it with prelabels
-            if prelabels is None:
-                in_embs = torch.cat([init, in_embs], dim=1)  # b x t x w
-            outputs, _ = self.rnn(in_embs, state.unsqueeze(0))  # b x (t-1) x h OR b x t x h
-            if prelabels is not None:
-                outputs = torch.cat([state.unsqueeze(1), outputs], dim=1)  # b x t x h
-            logits = self.linear(outputs)  # b x t x v
-            return logits
-        else:
-            all_logits = []
-            all_preds = []
-            if prelabels is None:
-                word = init.squeeze(1)  # b x w
-            else:
-                logits = self.linear(state)  # b x v
-                all_logits.append(logits)
-                pred = sample_func(logits)  # b
-                all_preds.append(pred)
-                word = self.embs(pred)  # b x w
-            state = state.unsqueeze(0)
+        labels_no_last = labels[:, :-1] # b x (t-1) # we don't take last word as input
+        in_embs = self.embs(labels_no_last)  # b x (t-1) x w
+        # don't append bos if we have already read it with prelabels
+        if prelabels is None:
+            in_embs = torch.cat([init, in_embs], dim=1)  # b x t x w
+        outputs, _ = self.rnn(in_embs, state.unsqueeze(0))  # b x (t-1) x h OR b x t x h
+        if prelabels is not None:
+            outputs = torch.cat([state.unsqueeze(1), outputs], dim=1)  # b x t x h
+        logits = self.linear(outputs)  # b x t x v
+        return logits
 
-            for step in range(num_steps):
-                word = word.unsqueeze(1)  # 1 x b x w
-                _, state = self.rnn(word, state)  # 1 x b x h
-                logits = self.linear(state.squeeze(0))  # b x v
-                all_logits.append(logits)
-                pred = sample_func(logits)  # b
-                word = self.embs(pred)  # b x w
-                all_preds.append(pred)
-            logits = torch.stack(all_logits, dim=1)
-            return logits, torch.stack(all_preds, dim=1)
+
+    def complete(self, x, state=None, sample_func=None):
+        """
+        Given tensor x containing token indices, fill in all padding token (zero) elements
+        with predictions from the decoder.
+        :param x: (batch_size, num_steps) tensor containing token indices
+        :return: tensor same shape as x, where zeros have been filled with decoder predictions
+        """
+        batch_size = x.shape[0]
+        num_steps = x.shape[1]
+        # create a initial state
+        if state is None:
+            state = self.init.expand(batch_size, -1).contiguous()  # bxh
+        # default to argmax sampling function if none is specified
+        if sample_func is None:
+            sample_func = partial(torch.argmax, dim=-1)
+        # initialize bos embedding to append to beginning of sequence
+        init = self.embs(self.bos_idx.expand(batch_size).unsqueeze(1))  # bx1xh
+
+        all_logits = []
+        all_preds = []
+        word = init.squeeze(1)  # b x w
+        state = state.unsqueeze(0) # b x 1 x h
+
+        for step in range(num_steps):
+            word = word.unsqueeze(1)  # b x 1 x w
+            _, state = self.rnn(word, state)  # 1 x b x h
+            logits = self.linear(state.squeeze(0))  # b x v
+            all_logits.append(logits)
+            pred = sample_func(logits)  # b
+
+            # here, we grab word from x if it exists, otherwise use prediction
+            mask = (x[:, step] != 0).long()  # b
+            word_index = x[:, step] * mask + pred * (1 - mask)
+            word = self.embs(word_index)  # b x w
+
+            all_preds.append(word_index)
+        logits = torch.stack(all_logits, dim=1)
+        predictions = torch.stack(all_preds, dim=1)
+        return logits, predictions
 
 
 class MismatchClassifier(nn.Module):
