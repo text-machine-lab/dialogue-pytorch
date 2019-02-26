@@ -20,7 +20,7 @@ class Decoder(nn.Module):
         self.out_layer = nn.Linear(d_dec, d_vocab)
         self.max_len = max_len
 
-    def forward(self, prelabels=None, labels=None, state=None, sample_func=None, batch_size=None, num_steps=None):
+    def forward(self, labels, state=None):
         """
         Run decoder on input context with optional conditioning on labels and prelabels
         :param context: None if no context, otherwise concatenated as input to decoder, or integer b for unconditional generation
@@ -31,81 +31,80 @@ class Decoder(nn.Module):
         :return: If labels are provided, returns logits tensor (batch_size, num_steps, vocab_size). If labels are not provided,
         returns predictions tensor (batch_size, num_steps) using provided sampling function.
         """
-        if batch_size is None:
-            if labels is not None:
-                batch_size = labels.shape[0]
-            else:
-                batch_size = prelabels.shape[0]
-        if num_steps is None:
-            num_steps = self.max_len
+        batch_size = labels.shape[0]
         if state is None:
             state = self.init.expand(batch_size, -1).contiguous()  # bxh
 
+        init = self.embs(self.bos_idx.expand(batch_size).unsqueeze(1))  # bx1xh
+
+        # initialize ntm state, which keeps track of reads and writes
+        ntm_state = torch.zeros_as(state).to(state.device)
+
+        labels_no_last = labels[:, :-1]  # b x (t-1) # we don't take last word as input
+        # break input into slices, read and write between slices
+        num_slices = labels.shape[1] // self.seg_size
+        all_logit_slices = []
+
+        for slice in range(num_slices):
+            # grab slice of input
+            labels_slice = labels_no_last[:, slice * self.seg_size:slice*self.seg_size+self.seg_size]
+            in_embs = self.embs(labels_slice)  # b x (t-1) x w
+
+            if slice == 0:  # add bos index on first iteration
+                in_embs = torch.cat([init, in_embs], dim=1)  # b x t x w
+
+            # give ntm state as input to all time steps of next slice
+            exp_ntm_state = torch.expand(ntm_state.unsqueeze(1), [-1, labels.shape[1], -1])  # b x t x h
+            rnn_input = torch.cat([in_embs, exp_ntm_state], dim=-1)
+            # read slice of conversation history, with access to ntm state
+            outputs, _ = self.rnn(rnn_input, state.unsqueeze(0))  # b x (t-1) x h OR b x t x h
+            # grab last state and use it to read and write from ntm
+            state = outputs[:, -1, :]
+            ntm_state = self.ntm(state)
+            # predict outputs for this slice
+            logits = self.out_layer(outputs)  # b x t x v
+            all_logit_slices.append(logits)
+        # append predictions for all slices together
+        logits = torch.cat(all_logit_slices, dim=1)
+
+        return logits
+
+
+    def complete(self, x, state=None, sample_func=None):
+        """
+        Given tensor x containing token indices, fill in all padding token (zero) elements
+        with predictions from the NTM decoder.
+        :param x: (batch_size, num_steps) tensor containing token indices
+        :return: tensor same shape as x, where zeros have been filled with decoder predictions
+
+        NOT COMPLETE
+        """
+        batch_size, num_steps = x.shape
+        if state is None:
+            state = self.init.expand(batch_size, -1).contiguous()  # bxh
         if sample_func is None:
             sample_func = partial(torch.argmax, dim=-1)
 
+        ntm_state = torch.zeros_as(state).to(state.device)
+
+        all_logits = []
+        all_preds = []
         init = self.embs(self.bos_idx.expand(batch_size).unsqueeze(1))  # bx1xh
+        word = init.squeeze(1)  # b x w
+        state = state.unsqueeze(0)
 
-        # give ability to run model on prelabels before actual labels
-        # we run on the prelabels, then extract the final states after reading all
-        # non-padding words
-        if prelabels is not None:
-            state = state.unsqueeze(0)  # 1 x b x h
-            in_embs = self.embs(prelabels)  # b x t x w
-            in_embs = torch.cat([init, in_embs], dim=1)  # b x (t+1) x w
-            outputs, _ = self.rnn(in_embs, state)  # b x (t+1) x h
-            prelabel_lens = (prelabels != 0).sum(dim=1)  # b
-            #final_states = batch_index3d(outputs.contiguous(), prelabel_lens)  # b x h
-            final_state = outputs[:, -1, :]
-            state = final_state  # b x h
+        for step in range(num_steps):
+            word = word.unsqueeze(1)  # 1 x b x w
+            _, state = self.rnn(word, state)  # 1 x b x h
+            logits = self.out_layer(state.squeeze(0))  # b x v
+            all_logits.append(logits)
+            pred = sample_func(logits)  # b
 
-        if labels is not None:
-            ntm_state = torch.zeros_as(state).to(state.device)
+            # here, we grab word from x if it exists, otherwise use prediction
+            mask = (x[:, step] != 0).long()  # b
+            word_index = x[:, step] * mask + pred * (1 - mask)  # use label or prediction, whichever is available
+            word = self.embs(word_index)  # b x w
 
-            labels_no_last = labels[:, :-1]  # b x (t-1) # we don't take last word as input
-            num_slices = labels.shape[1] // self.seg_size
-            all_logit_slices = []
-            for slice in range(num_slices):
-                labels_slice = labels_no_last[:, slice * self.seg_size:slice*self.seg_size+self.seg_size]
-
-                in_embs = self.embs(labels_slice)  # b x (t-1) x w
-                if slice==0 and prelabels is None:  # add bos index on first iteration
-                    in_embs = torch.cat([init, in_embs], dim=1)  # b x t x w
-                exp_ntm_state = torch.expand(ntm_state.unsqueeze(1), [-1, labels.shape[1], -1])  # b x t x h
-                rnn_input = torch.cat([in_embs, exp_ntm_state], dim=-1)
-                # don't append bos if we have already read it with prelabels
-                outputs, _ = self.rnn(rnn_input, state.unsqueeze(0))  # b x (t-1) x h OR b x t x h
-                state = outputs[:, -1, :]
-                # read and write from NTM
-                ntm_state = self.ntm(state)
-
-                if prelabels is not None:
-                    outputs = torch.cat([state.unsqueeze(1), outputs], dim=1)  # b x t x h
-                logits = self.out_layer(outputs)  # b x t x v
-                all_logit_slices.append(logits)
-            logits = torch.cat(all_logit_slices, dim=1)
-
-            return logits
-        else:
-            all_logits = []
-            all_preds = []
-            if prelabels is None:
-                word = init.squeeze(1)  # b x w
-            else:
-                logits = self.out_layer(state)  # b x v
-                all_logits.append(logits)
-                pred = sample_func(logits)  # b
-                all_preds.append(pred)
-                word = self.embs(pred)  # b x w
-            state = state.unsqueeze(0)
-
-            for step in range(num_steps):
-                word = word.unsqueeze(1)  # 1 x b x w
-                _, state = self.rnn(word, state)  # 1 x b x h
-                logits = self.out_layer(state.squeeze(0))  # b x v
-                all_logits.append(logits)
-                pred = sample_func(logits)  # b
-                word = self.embs(pred)  # b x w
-                all_preds.append(pred)
-            logits = torch.stack(all_logits, dim=1)
-            return logits, torch.stack(all_preds, dim=1)
+            all_preds.append(word_index)
+        logits = torch.stack(all_logits, dim=1)
+        return logits, torch.stack(all_preds, dim=1)

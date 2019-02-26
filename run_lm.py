@@ -179,7 +179,6 @@ def replace_eos_slashs(utterances, vocab, reverse=False):
     return utterances * (1-eos_tokens) + s_tokens  # set all eos to zero, then add /s token map
 
 
-
 def gather_response(convo, split_indices, max_len):
     """
     Extract all tokens in convo that appear after index in split_indices (batched). Return
