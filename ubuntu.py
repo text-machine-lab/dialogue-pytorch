@@ -147,16 +147,20 @@ class UbuntuCorpus(Dataset):
             self.convos = ds_file['convos']
 
         # dispense one example for testing
-        history, response, convo = self[0]
+        if self.concat_feature:
+            history, response, convo = self[0]
+            assert isinstance(convo, np.ndarray)
+            assert convo.shape == (history_len + self.max_len,)
+        else:
+            history, response = self[0]
+
         assert isinstance(history, np.ndarray)
         assert isinstance(response, np.ndarray)
-        assert isinstance(convo, np.ndarray)
         if split_history:
             assert history.shape == (num_splits, history_len)
         else:
             assert history.shape == (history_len,)
         assert response.shape == (self.max_len,)
-        assert convo.shape == (history_len + self.max_len,)
 
         # if mismatch is true, we set it now after loading the first response
         self.mismatch = mismatch

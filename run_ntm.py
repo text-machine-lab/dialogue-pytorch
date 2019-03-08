@@ -1,28 +1,31 @@
-"""Train a language model on the Ubuntu dataset."""
+"""Train a language model augmented with neural turing machine, on the Ubuntu dataset."""
 
 import argparse
 import os
 from datetime import datetime
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader
+from os_ds import OpenSubtitlesDataset
 from ubuntu import UbuntuCorpus
-from models import random_sample, Decoder
+from models import Seq2Seq, random_sample, Decoder
+from ntm_models import NTMAugmentedDecoder
+from nlputils import convert_npy_to_str
 from tensorboard_logger import configure, log_value
 from tqdm import tqdm
 from tgalert import TelegramAlert
 from utils import load_train_args, print_numpy_examples
 
-parser = argparse.ArgumentParser(description='Run language model on Opensubtitles conversations')
+parser = argparse.ArgumentParser(description='Run ntm model on Opensubtitles conversations')
 load_train_args(parser)
 args = parser.parse_args()
 
 alert = TelegramAlert(disable=args.tgdisable)
 
 device = torch.device(args.device if torch.cuda.is_available() else "cpu")
-torch.cuda.set_device(device)
 
 if args.run is not None and args.epochs > 0:
     configure(os.path.join(args.run, str(datetime.now())), flush_secs=5)
@@ -58,15 +61,16 @@ if args.val is not None:
     print('Printing statistics for validation set')
     valds.print_statistics()
 else:
-    valds = ds
     print('Using training set for evaluation')
+    valds = ds
 
 if args.regen: alert.write('run_lm: Building datasets complete')
 
 print('Num examples: %s' % len(ds))
 print('Vocab length: %s' % len(ds.vocab))
 
-model = Decoder(len(ds.vocab), d_emb, d_dec, history_len + max_len, bos_idx=ds.vocab[ds.bos])
+model = NTMAugmentedDecoder(len(ds.vocab), d_emb, d_dec, history_len + max_len, bos_idx=ds.vocab[ds.bos])
+#model = Decoder(len(ds.vocab), d_emb, d_dec, history_len + max_len, d_context=0, bos_idx=ds.vocab[ds.bos])
 
 if args.restore and args.model_path is not None:
     print('Restoring model from save')
@@ -87,7 +91,7 @@ optim = optim.Adam(model.parameters(), lr=lr)
 # if provided, determine validation loss throughout training
 valiter = None
 if args.val is not None:
-    valiter = iter(DataLoader(valds, batch_size=32, num_workers=0))
+    valiter = iter(DataLoader(valds, batch_size=32, num_workers=1))
 for epoch_idx in range(num_epochs):
     dl = DataLoader(ds, batch_size=32, shuffle=False, num_workers=1)
     bar = tqdm(dl)  # visualize progress bar
@@ -96,7 +100,7 @@ for epoch_idx in range(num_epochs):
 
         _, _, convo = data
 
-        logits = model(None, labels=convo)
+        logits = model(labels=convo)
 
         loss = ce(logits.view(-1, logits.shape[-1]), convo.view(-1))
         optim.zero_grad()
@@ -115,7 +119,7 @@ for epoch_idx in range(num_epochs):
                     valiter = iter(DataLoader(valds, batch_size=32, num_workers=0))
                     history, response, convo = next(valiter)
                 convo = convo.to(device)
-                logits = model(None, labels=convo)
+                logits = model(labels=convo)
                 loss = ce(logits.view(-1, logits.shape[-1]), convo.view(-1))
                 log_value('val_loss', loss.item(), epoch_idx * len(dl) + i)
 
@@ -180,21 +184,38 @@ def gather_response(convo, split_indices, max_len):
     """
     batch_size = convo.shape[0]
     convo_len = convo.shape[1]
-    result = torch.zeros([batch_size, max_len]).long()
+    result = torch.zeros([batch_size, max_len]).to(convo.device).long()
     for i in range(batch_size):
         response_len = min(convo_len - split_indices[i], max_len)
         result[i, :response_len] = convo[i, split_indices[i]:split_indices[i] + response_len]
     return result
 
+def gather_logits(convo_logits, split_indices, max_len):
+    """
+    Extract all tokens in convo that appear after index in split_indices (batched). Return
+    tensor containing these tokens extracted.
+
+    :param convo: (batch_size, convo_len) tensor containing token indices
+    :param split_indices: (batch_size,) tensor, for each example giving the index of the first token to extract
+    :param max_len: maximum number of 1's in a row of the mask, maximum extracted response
+    :return: (batch_size, max_len) tensor containing extracted indices
+    """
+    batch_size = convo_logits.shape[0]
+    convo_len = convo_logits.shape[1]
+    vocab_len = convo_logits.shape[2]
+    result = torch.zeros([batch_size, max_len, vocab_len]).to(convo_logits.device)
+    for i in range(batch_size):
+        response_len = min(convo_len - split_indices[i], max_len)
+        result[i, :response_len] = convo_logits[i, split_indices[i]:split_indices[i] + response_len, :]
+    return result
+
+if args.samples_file is not None:
+    args.samples_file = open(str(args.samples_file), 'w')
 
 with torch.no_grad():
     print('Printing generated examples')
-    dl = DataLoader(valds, batch_size=10, num_workers=0)
+    dl = DataLoader(valds, batch_size=10, num_workers=1)
     model.eval()
-
-    if args.samples_file is not None:
-        args.samples_file = open(str(args.samples_file), 'w')
-
     # print examples
     for i, data in enumerate(dl):
         data = [d.to(device) for d in data]
@@ -216,12 +237,10 @@ with torch.no_grad():
         # now we need to remove the response from the conversation
         print_numpy_examples(valds.vocab, valds.eos, history, response, response_preds, convo_preds, samples_file=args.samples_file)
 
-
-    # make sure to close samples file after using
     if args.samples_file is not None: args.samples_file.close()
 
     print('Evaluating perplexity')
-    dl = DataLoader(valds, batch_size=3, num_workers=0)
+    dl = DataLoader(valds, batch_size=32, num_workers=1)
     total_batches = min(len(dl), 1500)
     entropies = []
     bar = tqdm(dl, total=total_batches)
@@ -234,8 +253,10 @@ with torch.no_grad():
         data = [d.to(device) for d in data]
         history, response, convo = data
         history_no_eos = replace_eos_slashs(history, ds.vocab)
+        history_lens = (history_no_eos != 0).long().sum(dim=1)
 
-        logits = model(prelabels=history_no_eos, labels=response)
+        convo_logits = model(labels=convo)
+        logits = gather_logits(convo_logits, history_lens, max_len)
         logits = adjust_lm_logits(logits, ds.vocab)
         loss = ce(logits.view(-1, logits.shape[-1]), response.view(-1))
         entropies.append(loss)

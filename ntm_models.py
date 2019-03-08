@@ -4,17 +4,20 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from functools import partial
-from ntm.aio import EncapsulatedNTM  # found in the pytorch-ntm Github repo
+from ntm import NTM
 
 
-class Decoder(nn.Module):
-    def __init__(self, d_vocab, d_emb, d_dec, max_len, d_context, bos_idx, controller_layers, num_heads, N, M, seg_size=10):
+class NTMAugmentedDecoder(nn.Module):
+    def __init__(self, d_vocab, d_emb, d_dec, max_len, bos_idx, num_heads=8, N=64, M=32, seg_size=20):
+
         super().__init__()
         self.d_vocab = d_vocab
         self.seg_size = seg_size
         self.embs = nn.Embedding(d_vocab, d_emb)
-        self.rnn = nn.GRU(d_emb + d_context, d_dec, batch_first=True)
-        self.ntm = EncapsulatedNTM(d_dec, d_dec, d_dec, controller_layers, num_heads, N, M)
+        self.rnn = nn.GRU(d_emb + d_dec, d_dec, batch_first=True)
+        self.ntm_scale = nn.Parameter(torch.zeros([1, d_dec]), requires_grad=True)
+        self.ntm = NTM('mem-aug', embedding_size=d_dec, hidden_size=d_dec, memory_size=M, head_num=num_heads,
+                       memory_feature_size=N, output_size=d_dec)
         self.init = nn.Parameter(torch.zeros(1, d_dec), requires_grad=True)
         self.bos_idx = nn.Parameter(torch.tensor([bos_idx]), requires_grad=False)
         self.out_layer = nn.Linear(d_dec, d_vocab)
@@ -23,22 +26,20 @@ class Decoder(nn.Module):
     def forward(self, labels, state=None):
         """
         Run decoder on input context with optional conditioning on labels and prelabels
-        :param context: None if no context, otherwise concatenated as input to decoder, or integer b for unconditional generation
-        :param prelabels: run decoder on these labels before running on labels (complete the sequence)
         :param labels: labels conditioned on at each timestep in next-prediction task (used during training)
-        :param sample_func: specify a function logits (batch_size, vocab_size)--> predictions (batch_size,)
-        for model sampling. Default: argmax
+        :param state: initial state to begin decoding with. Could be output of encoder.
         :return: If labels are provided, returns logits tensor (batch_size, num_steps, vocab_size). If labels are not provided,
         returns predictions tensor (batch_size, num_steps) using provided sampling function.
         """
         batch_size = labels.shape[0]
+        self.ntm.reset(batch_size, device=labels.device)
         if state is None:
             state = self.init.expand(batch_size, -1).contiguous()  # bxh
 
         init = self.embs(self.bos_idx.expand(batch_size).unsqueeze(1))  # bx1xh
 
         # initialize ntm state, which keeps track of reads and writes
-        ntm_state = torch.zeros_as(state).to(state.device)
+        ntm_state = torch.zeros_like(state).to(state.device)
 
         labels_no_last = labels[:, :-1]  # b x (t-1) # we don't take last word as input
         # break input into slices, read and write between slices
@@ -47,14 +48,16 @@ class Decoder(nn.Module):
 
         for slice in range(num_slices):
             # grab slice of input
-            labels_slice = labels_no_last[:, slice * self.seg_size:slice*self.seg_size+self.seg_size]
+            labels_slice = labels_no_last[:, slice*self.seg_size:slice*self.seg_size+self.seg_size]
             in_embs = self.embs(labels_slice)  # b x (t-1) x w
 
             if slice == 0:  # add bos index on first iteration
                 in_embs = torch.cat([init, in_embs], dim=1)  # b x t x w
 
             # give ntm state as input to all time steps of next slice
-            exp_ntm_state = torch.expand(ntm_state.unsqueeze(1), [-1, labels.shape[1], -1])  # b x t x h
+            # multiple ntm state by scalars before giving to RNN, so it is not used in the beginning of training
+            scaled_ntm_state = ntm_state * self.ntm_scale
+            exp_ntm_state = scaled_ntm_state.unsqueeze(1).expand([-1, in_embs.shape[1], -1])  # b x t x h
             rnn_input = torch.cat([in_embs, exp_ntm_state], dim=-1)
             # read slice of conversation history, with access to ntm state
             outputs, _ = self.rnn(rnn_input, state.unsqueeze(0))  # b x (t-1) x h OR b x t x h
@@ -76,29 +79,36 @@ class Decoder(nn.Module):
         with predictions from the NTM decoder.
         :param x: (batch_size, num_steps) tensor containing token indices
         :return: tensor same shape as x, where zeros have been filled with decoder predictions
-
-        NOT COMPLETE
         """
         batch_size, num_steps = x.shape
+        self.ntm.reset(batch_size, device=x.device)
         if state is None:
             state = self.init.expand(batch_size, -1).contiguous()  # bxh
         if sample_func is None:
             sample_func = partial(torch.argmax, dim=-1)
 
-        ntm_state = torch.zeros_as(state).to(state.device)
+        ntm_state = torch.zeros_like(state).to(state.device)
 
         all_logits = []
         all_preds = []
         init = self.embs(self.bos_idx.expand(batch_size).unsqueeze(1))  # bx1xh
         word = init.squeeze(1)  # b x w
-        state = state.unsqueeze(0)
 
         for step in range(num_steps):
-            word = word.unsqueeze(1)  # 1 x b x w
-            _, state = self.rnn(word, state)  # 1 x b x h
-            logits = self.out_layer(state.squeeze(0))  # b x v
+            # run RNN over input words
+            rnn_input = torch.cat([word, ntm_state], dim=-1).unsqueeze(1)
+            _, state = self.rnn(rnn_input, state.unsqueeze(0))  # 1 x b x h
+            state = state.squeeze(0)
+
+            # produce prediction at each time step
+            logits = self.out_layer(state)  # b x v
             all_logits.append(logits)
             pred = sample_func(logits)  # b
+
+            # at the end of each segment, read and write from NTM
+            if step % self.seg_size == (self.seg_size - 1):
+                # end of each segment, read and write from NTM
+                ntm_state = self.ntm(state)
 
             # here, we grab word from x if it exists, otherwise use prediction
             mask = (x[:, step] != 0).long()  # b

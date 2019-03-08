@@ -29,10 +29,10 @@ class MismatchSeq2Seq(nn.Module):
 
 
 class Seq2Seq(nn.Module):
-    def __init__(self, d_emb, d_enc, d_vocab, d_dec, max_len, bos_idx):
+    def __init__(self, d_emb, d_vocab, d_rnn, max_len, bos_idx):
         super().__init__()
-        self.encoder = Encoder(d_emb, d_enc, d_vocab)
-        self.decoder = Decoder(d_vocab, d_emb, d_dec, max_len, d_enc, bos_idx)
+        self.encoder = Encoder(d_emb, d_rnn, d_vocab)
+        self.decoder = Decoder(d_vocab, d_emb, d_rnn, max_len, bos_idx)
 
     def forward(self, x, labels=None, sample_func=None):
         """
@@ -50,6 +50,11 @@ class Seq2Seq(nn.Module):
         e_states, e_final = self.encoder(x)
 
         return self.decoder(labels=labels, sample_func=sample_func, state=e_final)
+
+    def complete(self, x, sample_func=None):
+        e_states, e_final = self.encoder(x)
+
+        return self.decoder.complete(x, sample_func=sample_func, state=e_final)
 
 
 class Encoder(nn.Module):
@@ -84,11 +89,11 @@ def random_sample(x):
 
 
 class Decoder(nn.Module):
-    def __init__(self, d_vocab, d_emb, d_dec, max_len, d_context, bos_idx):
+    def __init__(self, d_vocab, d_emb, d_dec, max_len, bos_idx):
         super().__init__()
         self.d_vocab = d_vocab
         self.embs = nn.Embedding(d_vocab, d_emb)
-        self.rnn = nn.GRU(d_emb + d_context, d_dec, batch_first=True)
+        self.rnn = nn.GRU(d_emb, d_dec, batch_first=True)
         self.init = nn.Parameter(torch.zeros(1, d_dec), requires_grad=True)
         self.bos_idx = nn.Parameter(torch.tensor([bos_idx]), requires_grad=False)
         self.linear = nn.Linear(d_dec, d_vocab)
@@ -108,15 +113,14 @@ class Decoder(nn.Module):
         if batch_size is None:
             if labels is not None:
                 batch_size = labels.shape[0]
-            else:
+            elif state is not None:
+                batch_size = state.shape[0]
+            elif prelabels is not None:
                 batch_size = prelabels.shape[0]
-        if num_steps is None:
-            num_steps = self.max_len
+            else:
+                raise RuntimeError('Cannot infer batch size')
         if state is None:
             state = self.init.expand(batch_size, -1).contiguous()  # bxh
-
-        if sample_func is None:
-            sample_func = partial(torch.argmax, dim=-1)
 
         init = self.embs(self.bos_idx.expand(batch_size).unsqueeze(1))  # bx1xh
 
