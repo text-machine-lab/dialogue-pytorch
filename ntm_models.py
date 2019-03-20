@@ -14,7 +14,7 @@ class NTMAugmentedDecoder(nn.Module):
         self.d_vocab = d_vocab
         self.seg_size = seg_size
         self.embs = nn.Embedding(d_vocab, d_emb)
-        self.rnn = nn.GRU(d_emb + d_dec, d_dec, batch_first=True)
+        self.rnn = nn.GRU(d_emb, d_dec, batch_first=True)
         self.ntm_scale = nn.Parameter(torch.zeros([1, d_dec]), requires_grad=True)
         self.ntm = NTM('mem-aug', embedding_size=d_dec, hidden_size=d_dec, memory_size=M, head_num=num_heads,
                        memory_feature_size=N, output_size=d_dec)
@@ -56,14 +56,14 @@ class NTMAugmentedDecoder(nn.Module):
 
             # give ntm state as input to all time steps of next slice
             # multiple ntm state by scalars before giving to RNN, so it is not used in the beginning of training
-            scaled_ntm_state = ntm_state * self.ntm_scale
-            exp_ntm_state = scaled_ntm_state.unsqueeze(1).expand([-1, in_embs.shape[1], -1])  # b x t x h
-            rnn_input = torch.cat([in_embs, exp_ntm_state], dim=-1)
+            #scaled_ntm_state = ntm_state * self.ntm_scale
+            #exp_ntm_state = scaled_ntm_state.unsqueeze(1).expand([-1, in_embs.shape[1], -1])  # b x t x h
+            rnn_input = in_embs  # torch.cat([in_embs, exp_ntm_state], dim=-1)
             # read slice of conversation history, with access to ntm state
             outputs, _ = self.rnn(rnn_input, state.unsqueeze(0))  # b x (t-1) x h OR b x t x h
             # grab last state and use it to read and write from ntm
             state = outputs[:, -1, :]
-            ntm_state = self.ntm(state)
+            #ntm_state = self.ntm(state)
             # predict outputs for this slice
             logits = self.out_layer(outputs)  # b x t x v
             all_logit_slices.append(logits)
@@ -96,7 +96,7 @@ class NTMAugmentedDecoder(nn.Module):
 
         for step in range(num_steps):
             # run RNN over input words
-            rnn_input = torch.cat([word, ntm_state], dim=-1).unsqueeze(1)
+            rnn_input = word.unsqueeze(1)  # torch.cat([word, ntm_state], dim=-1).unsqueeze(1)
             _, state = self.rnn(rnn_input, state.unsqueeze(0))  # 1 x b x h
             state = state.squeeze(0)
 
@@ -105,10 +105,10 @@ class NTMAugmentedDecoder(nn.Module):
             all_logits.append(logits)
             pred = sample_func(logits)  # b
 
-            # at the end of each segment, read and write from NTM
-            if step % self.seg_size == (self.seg_size - 1):
-                # end of each segment, read and write from NTM
-                ntm_state = self.ntm(state)
+            # # at the end of each segment, read and write from NTM
+            # if step % self.seg_size == (self.seg_size - 1):
+            #     # end of each segment, read and write from NTM
+            #     ntm_state = self.ntm(state)
 
             # here, we grab word from x if it exists, otherwise use prediction
             mask = (x[:, step] != 0).long()  # b
