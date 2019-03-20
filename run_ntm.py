@@ -13,6 +13,7 @@ from ntm_models import NTMAugmentedDecoder
 from tensorboard_logger import configure, log_value
 from tqdm import tqdm
 from tgalert import TelegramAlert
+from run_lm import train, eval
 from utils import load_train_args, print_numpy_examples, gather_logits, move_prob_from_s_to_eos, replace_eos_slashs, \
     gather_response
 
@@ -184,6 +185,12 @@ with torch.no_grad():
     perplexity = torch.exp(entropy)
     print('Perplexity: %s' % perplexity.item())
 
-
+# if __name__ == '__main__':
+#     #args, ds, valds, model, device, hyperparams = setup()
+#     #history_len, max_len, max_examples, max_vocab_examples, max_vocab, num_epochs, num_print, d_emb, d_dec, lr = hyperparams
+#     train(model, ds, args.epochs, model_path=args.model_path, valds=valds, device=device, run_dir=args.run)
+#     entropy, perplexity = eval(valds, model, device, max_len, samples_file=args.samples_file)
+#     print('Cross entropy: %s' % entropy.item())
+#     print('Perplexity: %s' % perplexity.item())
 
 
