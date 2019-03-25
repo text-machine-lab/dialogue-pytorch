@@ -83,7 +83,7 @@ def setup():
 
 ######### TRAINING #####################################################################################################
 
-def train(model, callback, ds, num_epochs, model_path=None, valds=None, device=torch.device('cpu'), run_dir=None):
+def train(model, callback, ds, num_epochs, lr, model_path=None, valds=None, device=torch.device('cpu'), run_dir=None):
     """Train model on entire conversations. Optionally print to Tensorboard logger and optionally"""
 
     model.to(device)
@@ -133,11 +133,11 @@ def train(model, callback, ds, num_epochs, model_path=None, valds=None, device=t
             if (i % 1000 == 999 or i == len(dl) - 1) and model_path is not None:
                 torch.save(model.state_dict(), model_path)
 
-    if args.epochs > 0: alert.write('run_lm: Training complete')
+    if num_epochs > 0: alert.write('run_lm: Training complete')
 
 ######### EVALUATION ###################################################################################################
 
-def print_examples(valds, model, device, max_len, samples_file=None):
+def print_examples(valds, model, device, max_len, num_print=10, samples_file=None):
     with torch.no_grad():
         print('Printing generated examples')
         dl = DataLoader(valds, batch_size=10, num_workers=0)
@@ -154,7 +154,7 @@ def print_examples(valds, model, device, max_len, samples_file=None):
                 break
 
             # here we remove eos from the history and replace it with </s> (end of utterance)
-            history_no_eos = replace_eos_slashs(history, ds.vocab)
+            history_no_eos = replace_eos_slashs(history, valds.vocab)
             # we will ask the model to fill in the rest of the conversation (i.e. the response)
             response_space = torch.zeros([history_no_eos.shape[0], max_len]).long().to(device)
             # we create space to fill in the response
@@ -162,16 +162,27 @@ def print_examples(valds, model, device, max_len, samples_file=None):
             logits, convo_preds = model.complete(convo_incomplete, sample_func=random_sample)
             history_lens = (history_no_eos != 0).long().sum(dim=1)
             response_preds = gather_response(convo_preds, history_lens, max_len)
-            response_preds = replace_eos_slashs(response_preds, ds.vocab, reverse=True)
+            response_preds = replace_eos_slashs(response_preds, valds.vocab, reverse=True)
             # pred represents the whole completed conversation
             # now we need to remove the response from the conversation
             print_numpy_examples(valds.vocab, valds.eos, history, response, response_preds, convo_preds, samples_file=samples_file)
 
+        if samples_file is not None: samples_file.close()
 
-def eval_perplexity(valds, model, device, samples_file=None):
+class LMPerplexityCallback:
+    def __init__(self, model):
+        self.model = model
+    def __call__(self, history_no_eos, response, convo):
+        """Allow language model to predict logits for conversation history"""
+        logits = self.model(prelabels=history_no_eos, labels=response)
+        logits = move_prob_from_s_to_eos(logits, ds.vocab)
+        return logits
+
+
+def eval_perplexity(perplexity_callback, valds, device):
     with torch.no_grad():
         # make sure to close samples file after using
-        if samples_file is not None: samples_file.close()
+
 
         print('Evaluating perplexity')
         ce = nn.CrossEntropyLoss(ignore_index=0)
@@ -187,10 +198,10 @@ def eval_perplexity(valds, model, device, samples_file=None):
 
             data = [d.to(device) for d in data]
             history, response, convo = data
-            history_no_eos = replace_eos_slashs(history, ds.vocab)
+            history_no_eos = replace_eos_slashs(history, valds.vocab)
 
-            logits = model(prelabels=history_no_eos, labels=response)
-            logits = move_prob_from_s_to_eos(logits, ds.vocab)
+            logits = perplexity_callback(history_no_eos, response, convo)
+
             loss = ce(logits.view(-1, logits.shape[-1]), response.view(-1))
             entropies.append(loss)
 
@@ -205,9 +216,10 @@ if __name__ == '__main__':
     history_len, max_len, max_examples, max_vocab_examples, max_vocab, num_epochs, num_print, d_emb, d_dec, lr = hyperparams
 
     callback = lambda convo: model(None, labels=convo)
-    train(model, callback, ds, args.epochs, model_path=args.model_path, valds=valds, device=device, run_dir=args.run)
+    train(model, callback, ds, args.epochs, lr, model_path=args.model_path, valds=valds, device=device, run_dir=args.run)
 
     print_examples(valds, model, device, max_len, samples_file=args.samples_file)
-    entropy, perplexity = eval_perplexity(valds, model, device, samples_file=args.samples_file)
+    callback = LMPerplexityCallback(model)
+    entropy, perplexity = eval_perplexity(callback, valds, device)
     print('Cross entropy: %s' % entropy.item())
     print('Perplexity: %s' % perplexity.item())
